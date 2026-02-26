@@ -1,15 +1,18 @@
 # EngVision — CAD Dimensional Analysis Extraction
 
-A .NET 10 + React toolkit that uses **OpenCvSharp4** to detect numbered measurement bubbles and table regions in engineering CAD drawings (PDF), segments them into cropped images, and feeds them through a **vision LLM** (GPT-4o / GPT-5.2) via **Microsoft.Extensions.AI** to extract and cross-check dimensional data.
+A toolkit that detects numbered measurement bubbles and table regions in engineering CAD drawings (PDF), segments them into cropped images, and feeds them through a **vision LLM** (GPT-4o / GPT-5.2) to extract and cross-check dimensional data.
 
 Includes a **web-based annotation dashboard** for manually labeling ground truth bounding boxes, comparing against auto-detection, and computing precision/recall/F1 metrics to tune the detection pipeline.
+
+The API backend is available in two implementations — **.NET** and **Python** — selectable via a single configuration flag.
 
 ## Architecture
 
 ```
 eng-vision.sln
-├── EngVision/              # Core library: OpenCV detection, PDF rendering, vision LLM
+├── EngVision/              # Core library: OpenCV detection, PDF rendering, vision LLM (.NET)
 ├── EngVision.Api/          # .NET Minimal API serving detection + annotation endpoints
+├── engvision-py/           # Python (FastAPI) port of the API — same endpoints, same behaviour
 ├── EngVision.Web/          # React + Vite annotation dashboard
 ├── EngVision.AppHost/      # Aspire orchestrator (runs API + frontend together)
 ├── EngVision.ServiceDefaults/  # Aspire service defaults
@@ -18,30 +21,86 @@ eng-vision.sln
 
 ## Quick Start
 
+### Prerequisites
+
+| Tool | Required for |
+|------|-------------|
+| [.NET 10 SDK](https://dotnet.microsoft.com/) | Building & running the .NET backend and Aspire host |
+| [Node.js 20+](https://nodejs.org/) | React frontend |
+| [Aspire CLI](https://learn.microsoft.com/dotnet/aspire) | Orchestrating the full stack |
+| [uv](https://docs.astral.sh/uv/) | Python backend only — environment & dependency management |
+| [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) | Python backend only — system install needed for `pytesseract` |
+
 ### Run with Aspire (recommended)
 
+By default the **.NET** backend is used:
+
 ```bash
-cd EngVision.AppHost
-dotnet run
+aspire run
 ```
 
-This starts both the API and React frontend. Open the Aspire dashboard URL shown in the console to see endpoints.
+To run the **Python** backend instead, set the `ApiBackend` flag to `python` using any of these methods:
 
-### Run standalone CLI (detection only)
+```bash
+# Option 1 — CLI argument
+aspire run -- --ApiBackend python
+
+# Option 2 — Environment variable (PowerShell)
+$env:ApiBackend = "python"; aspire run
+
+# Option 3 — Environment variable (bash/zsh)
+ApiBackend=python aspire run
+```
+
+Or change it persistently in `EngVision.AppHost/appsettings.json`:
+
+```jsonc
+{
+  "ApiBackend": "python"   // "dotnet" (default) or "python"
+}
+```
+
+Aspire starts the selected API backend, waits for it to be healthy, then launches the React frontend with the proxy automatically pointed at the API. Open the Aspire dashboard URL shown in the console to see all resource endpoints.
+
+### Run standalone CLI (detection only — .NET)
 
 ```bash
 cd EngVision
 dotnet run -- ..\sample_docs\WFRD_Sample_Dimentional_Analysis.pdf
+```
+
+### Run the Python API standalone (without Aspire)
+
+```bash
+cd engvision-py
+uv run engvision          # starts uvicorn on port 5062
 ```
 
 ### Run with vision LLM extraction
 
-```bash
-$env:OPENAI_API_KEY = "sk-..."
-$env:OPENAI_MODEL = "gpt-4o"
-cd EngVision
-dotnet run -- ..\sample_docs\WFRD_Sample_Dimentional_Analysis.pdf
+Create a `.env` file in the repo root (or set the variables directly):
+
+```env
+AZURE_ENDPOINT=https://your-openai-resource.cognitiveservices.azure.com
+AZURE_KEY=your-key-here
+AZURE_DEPLOYMENT_NAME=gpt-4o
 ```
+
+Both backends read this file automatically.
+
+## API Backend Comparison
+
+| | .NET (`EngVision.Api`) | Python (`engvision-py`) |
+|---|---|---|
+| Framework | ASP.NET Minimal APIs | FastAPI + Uvicorn |
+| PDF rendering | PDFtoImage + SkiaSharp | PyMuPDF (fitz) |
+| Computer vision | OpenCvSharp4 | opencv-python |
+| OCR | TesseractOCR NuGet | pytesseract (requires system Tesseract) |
+| LLM | OpenAI .NET SDK | openai Python SDK |
+| Package manager | NuGet (dotnet restore) | uv (uv sync) |
+| Aspire integration | `AddProject<>()` | `AddUvicornApp()` + `WithUv()` |
+
+Both backends expose **identical API endpoints** and return the same JSON shapes, so the React frontend works with either one without changes.
 
 ## Annotation Dashboard
 
@@ -67,7 +126,7 @@ The web dashboard (`EngVision.Web`) lets you:
 
 ## Detection Pipeline
 
-1. **PDF → Image**: Renders pages at 300 DPI via PDFium/SkiaSharp
+1. **PDF → Image**: Renders pages at 300 DPI
 2. **Bubble Detection**: Multi-pass HoughCircles + strict verification (white interior, dark text, visible outline)
 3. **Leader Line Tracing**: Follows leader lines from bubbles to find associated dimension text
 4. **Table Detection**: Morphological line detection for tabular data on pages 2-4
@@ -85,17 +144,13 @@ The web dashboard (`EngVision.Web`) lets you:
 | GET | `/api/pdfs/{file}/pages/{n}/annotations` | Get manual + auto annotations |
 | POST | `/api/pdfs/{file}/pages/{n}/annotations` | Save manual annotation |
 | PUT | `/api/pdfs/{file}/pages/{n}/annotations/{id}` | Update annotation |
+| DELETE | `/api/pdfs/{file}/pages/{n}/annotations` | Clear page annotations |
 | DELETE | `/api/pdfs/{file}/pages/{n}/annotations/{id}` | Delete annotation |
 | GET | `/api/pdfs/{file}/annotations/export` | Export ground truth JSON |
 | GET | `/api/pdfs/{file}/pages/{n}/accuracy` | Compute detection accuracy |
-
-## NuGet / npm Packages
-
-| Package | Purpose |
-|---------|---------|
-| `OpenCvSharp4` + `runtime.win` | Computer vision |
-| `PDFtoImage` / `SkiaSharp` | PDF rendering |
-| `Microsoft.Extensions.AI` | AI abstraction |
-| `Microsoft.Extensions.AI.OpenAI` | OpenAI vision integration |
-| `Aspire.Hosting.NodeJs` | Aspire Node.js hosting |
-| `react` + `vite` | Annotation dashboard UI |
+| POST | `/api/pipeline/run` | Upload PDF and run full pipeline |
+| POST | `/api/pipeline/run-sample/{file}` | Run pipeline on a sample PDF |
+| GET | `/api/pipeline/{runId}/results` | Get pipeline run results |
+| GET | `/api/pipeline/{runId}/pages/{n}/image` | Get rendered page from a run |
+| GET | `/api/pipeline/{runId}/pages/{n}/overlay` | Get annotated overlay image |
+| GET | `/api/pipeline/runs` | List all pipeline runs |
