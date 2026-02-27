@@ -51,7 +51,10 @@ var config = new EngVisionConfig
     HoughMaxRadius = 50,
     HoughParam1 = 120,
     HoughParam2 = 25,
-    BubbleContextPadding = 150
+    BubbleContextPadding = 150,
+    OcrProvider = Environment.GetEnvironmentVariable("OCR_PROVIDER") ?? "Tesseract",
+    AzureDocIntEndpoint = Environment.GetEnvironmentVariable("AZURE_DOCINT_ENDPOINT") ?? "",
+    AzureDocIntKey = Environment.GetEnvironmentVariable("AZURE_DOCINT_KEY") ?? ""
 };
 
 // Resolve PDF path

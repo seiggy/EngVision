@@ -8,7 +8,7 @@ namespace EngVision.Services;
 /// Extracts balloon# → dimension mapping from inspection report table pages
 /// using grid detection + cell-by-cell Tesseract OCR.
 /// </summary>
-public class TableOcrService : IDisposable
+public class TableOcrService : ITableOcrService
 {
     private readonly Engine _engine;
 

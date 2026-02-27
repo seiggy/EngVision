@@ -88,6 +88,18 @@ AZURE_DEPLOYMENT_NAME=gpt-5.3-codex
 
 Both backends read this file automatically.
 
+### OCR Provider — Azure Document Intelligence (optional)
+
+By default, OCR uses local **Tesseract**. To use **Azure Document Intelligence** instead (better accuracy on structured documents, single-call full-PDF processing):
+
+```env
+OCR_PROVIDER=Azure
+AZURE_DOCINT_ENDPOINT=https://your-docint-resource.cognitiveservices.azure.com
+AZURE_DOCINT_KEY=your-key-here
+```
+
+When `OCR_PROVIDER=Azure`, both table dimension extraction and bubble number OCR go through Azure's `prebuilt-layout` and `prebuilt-read` models. The full multi-page PDF is sent in a single API call for table extraction. Falls back to Tesseract automatically if the Azure credentials are missing.
+
 ## API Backend Comparison
 
 | | .NET (`EngVision.Api`) | Python (`engvision-py`) |
@@ -95,7 +107,7 @@ Both backends read this file automatically.
 | Framework | ASP.NET Minimal APIs | FastAPI + Uvicorn |
 | PDF rendering | PDFtoImage + SkiaSharp | PyMuPDF (fitz) |
 | Computer vision | OpenCvSharp4 | opencv-python |
-| OCR | TesseractOCR NuGet | pytesseract (requires system Tesseract) |
+| OCR | TesseractOCR NuGet (or Azure Doc Intelligence) | pytesseract / Azure Doc Intelligence |
 | LLM | OpenAI .NET SDK | openai Python SDK |
 | Package manager | NuGet (dotnet restore) | uv (uv sync) |
 | Aspire integration | `AddProject<>()` | `AddUvicornApp()` + `WithUv()` |

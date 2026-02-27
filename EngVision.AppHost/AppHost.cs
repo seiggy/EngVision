@@ -13,7 +13,10 @@ var usePython = string.Equals(
 if (usePython)
 {
     var api = builder.AddUvicornApp("api", "../engvision-py", "engvision.app:app")
-        .WithUv();
+        .WithUv()
+        .WithEnvironment("OCR_PROVIDER", builder.Configuration["OCR_PROVIDER"] ?? "Tesseract")
+        .WithEnvironment("AZURE_DOCINT_ENDPOINT", builder.Configuration["AZURE_DOCINT_ENDPOINT"] ?? "")
+        .WithEnvironment("AZURE_DOCINT_KEY", builder.Configuration["AZURE_DOCINT_KEY"] ?? "");
 
     builder.AddNpmApp("frontend", "../EngVision.Web", "dev")
         .WithReference(api).WaitFor(api)

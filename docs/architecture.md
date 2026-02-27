@@ -193,8 +193,8 @@ Each step is implemented as a service class under
 |---|---|---|
 | Render | `pdf_renderer.py` | `PdfRendererService` |
 | Detect | `bubble_detection.py` | `BubbleDetectionService` |
-| OCR (bubbles) | `bubble_ocr.py` | `BubbleOcrService` |
-| OCR (tables) | `table_ocr.py` | `TableOcrService` |
+| OCR (bubbles) | `bubble_ocr.py` / `azure_bubble_ocr.py` | `BubbleOcrService` or `AzureBubbleOcrService` |
+| OCR (tables) | `table_ocr.py` / `azure_table_ocr.py` | `TableOcrService` or `AzureTableOcrService` |
 | Leader line trace | `leader_line_tracer.py` | `LeaderLineTracerService` |
 | LLM validation | `vision_llm.py` | `VisionLlmService` (`validate_dimension`, `discover_dimension`) |
 | Merge | `dimension_matcher.py` | `are_similar`, `confidence_score` |

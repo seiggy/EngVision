@@ -21,4 +21,9 @@ public class EngVisionConfig
     // Table detection parameters
     public int TableMinWidth { get; set; } = 200;
     public int TableMinHeight { get; set; } = 100;
+
+    // OCR provider: "Tesseract" (default, local) or "Azure" (Document Intelligence)
+    public string OcrProvider { get; set; } = "Tesseract";
+    public string AzureDocIntEndpoint { get; set; } = string.Empty;
+    public string AzureDocIntKey { get; set; } = string.Empty;
 }

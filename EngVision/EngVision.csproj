@@ -18,6 +18,7 @@
     <PackageReference Include="PDFtoImage" Version="5.2.0" />
     <PackageReference Include="SkiaSharp" Version="3.119.2" />
     <PackageReference Include="TesseractOCR" Version="5.5.1" />
+    <PackageReference Include="Azure.AI.DocumentIntelligence" Version="1.0.0" />
   </ItemGroup>
 
   <ItemGroup>

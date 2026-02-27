@@ -74,15 +74,21 @@ ocr_results = ocr_service.extract_all(raw_crops_dir)
 
 ### Step 3 — Table OCR
 
-Runs Tesseract OCR on **pages 2+** to extract a balloon-number → dimension mapping from tabular data.
+Extracts a balloon-number → dimension mapping from tabular data on **pages 2+**. The OCR provider is selected by the `OCR_PROVIDER` environment variable:
+
+- **Tesseract** (default): Morphological grid detection followed by per-cell Tesseract OCR, page by page.
+- **Azure Document Intelligence**: Sends the full multi-page PDF in a single API call using the `prebuilt-layout` model.
 
 ```python
-table_ocr = TableOcrService(self._tess_data_path)
-tesseract_dimensions: dict[int, str] = {}
-for i in range(1, len(page_images)):
-    page_dims = table_ocr.extract_balloon_dimensions(page_images[i])
-    for num, dim in page_dims.items():
-        tesseract_dimensions.setdefault(num, dim)
+ocr_service, table_ocr = self._create_ocr_services()  # respects OCR_PROVIDER
+
+# Azure Doc Intelligence: full-PDF mode (single call)
+if hasattr(table_ocr, "extract_balloon_dimensions_from_pdf"):
+    tesseract_dimensions = table_ocr.extract_balloon_dimensions_from_pdf(pdf_bytes)
+else:
+    # Tesseract: page-by-page
+    for i in range(1, len(page_images)):
+        page_dims = table_ocr.extract_balloon_dimensions(page_images[i])
 ```
 
 The first occurrence of each balloon number wins (via `setdefault`).

@@ -23,6 +23,24 @@ public class PipelineService
         _tessDataPath = tessDataPath;
     }
 
+    /// <summary>Create OCR services based on OCR_PROVIDER config.</summary>
+    private (IBubbleOcrService bubbleOcr, ITableOcrService tableOcr) CreateOcrServices()
+    {
+        if (string.Equals(_config.OcrProvider, "Azure", StringComparison.OrdinalIgnoreCase))
+        {
+            var ep = _config.AzureDocIntEndpoint;
+            var key = _config.AzureDocIntKey;
+            if (string.IsNullOrEmpty(ep) || string.IsNullOrEmpty(key))
+            {
+                Console.WriteLine("  WARNING: OCR_PROVIDER=Azure but AZURE_DOCINT_ENDPOINT/KEY not set — falling back to Tesseract");
+                return (new BubbleOcrService(_tessDataPath), new TableOcrService(_tessDataPath));
+            }
+            Console.WriteLine($"  Using Azure Document Intelligence for OCR ({ep})");
+            return (new AzureBubbleOcrService(ep, key), new AzureTableOcrService(ep, key));
+        }
+        return (new BubbleOcrService(_tessDataPath), new TableOcrService(_tessDataPath));
+    }
+
     /// <summary>
     /// Runs the full pipeline on a PDF file. Saves page images and overlay to outputDir.
     /// </summary>
@@ -83,18 +101,28 @@ public class PipelineService
             // Step 2c: OCR bubble numbers
             Progress("OCR-ing bubble numbers...");
             stepSw.Restart();
-            using var ocrService = new BubbleOcrService(_tessDataPath);
-            var ocrResults = ocrService.ExtractAll(rawCropsDir);
+            var (bubbleOcr, tableOcrSvc) = CreateOcrServices();
+            using var ocrDisp = bubbleOcr as IDisposable;
+            using var tableDisp = tableOcrSvc as IDisposable;
+            var ocrResults = bubbleOcr.ExtractAll(rawCropsDir);
 
             // Step 3: Table OCR (pages 2+)
             Progress("OCR-ing table data...");
-            using var tableOcr = new TableOcrService(_tessDataPath);
             var tesseractDimensions = new Dictionary<int, string>();
-            for (int i = 1; i < pageImages.Count; i++)
+            if (tableOcrSvc is AzureTableOcrService azureTable)
             {
-                var pageDims = tableOcr.ExtractBalloonDimensions(pageImages[i]);
-                foreach (var (num, dim) in pageDims)
-                    tesseractDimensions.TryAdd(num, dim);
+                // Full-PDF mode: single API call for all pages
+                var pdfBytes = File.ReadAllBytes(pdfPath);
+                tesseractDimensions = azureTable.ExtractBalloonDimensionsFromPdf(pdfBytes);
+            }
+            else if (tableOcrSvc is TableOcrService localTable)
+            {
+                for (int i = 1; i < pageImages.Count; i++)
+                {
+                    var pageDims = localTable.ExtractBalloonDimensions(pageImages[i]);
+                    foreach (var (num, dim) in pageDims)
+                        tesseractDimensions.TryAdd(num, dim);
+                }
             }
             ocrMs = stepSw.ElapsedMilliseconds;
 
@@ -455,8 +483,10 @@ public class PipelineService
                 Cv2.ImWrite(Path.Combine(rawCropsDir, $"bubble_{b.BubbleNumber:D3}.png"), crop);
             }
 
-            using var ocrService = new BubbleOcrService(_tessDataPath);
-            var ocrResults = ocrService.ExtractAll(rawCropsDir);
+            var (bubbleOcr2, tableOcrSvc2) = CreateOcrServices();
+            using var ocrDisp2 = bubbleOcr2 as IDisposable;
+            using var tableDisp2 = tableOcrSvc2 as IDisposable;
+            var ocrResults = bubbleOcr2.ExtractAll(rawCropsDir);
             detectMs = stepSw.ElapsedMilliseconds;
 
             await writer.WriteAsync(new Dictionary<string, object>
@@ -473,13 +503,20 @@ public class PipelineService
                 ["name"] = "ocr", ["message"] = "OCR-ing table data..."
             });
             stepSw.Restart();
-            using var tableOcr = new TableOcrService(_tessDataPath);
             var tesseractDimensions = new Dictionary<int, string>();
-            for (int i = 1; i < pageImages.Count; i++)
+            if (tableOcrSvc2 is AzureTableOcrService azureTable2)
             {
-                var pageDims = tableOcr.ExtractBalloonDimensions(pageImages[i]);
-                foreach (var (num, dim) in pageDims)
-                    tesseractDimensions.TryAdd(num, dim);
+                var pdfBytes = File.ReadAllBytes(pdfPath);
+                tesseractDimensions = azureTable2.ExtractBalloonDimensionsFromPdf(pdfBytes);
+            }
+            else if (tableOcrSvc2 is TableOcrService localTable2)
+            {
+                for (int i = 1; i < pageImages.Count; i++)
+                {
+                    var pageDims = localTable2.ExtractBalloonDimensions(pageImages[i]);
+                    foreach (var (num, dim) in pageDims)
+                        tesseractDimensions.TryAdd(num, dim);
+                }
             }
             ocrMs = stepSw.ElapsedMilliseconds;
 

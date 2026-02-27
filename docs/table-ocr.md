@@ -4,10 +4,12 @@
 
 Pages 2+ of the CAD PDF contain dimensional analysis tables that map balloon numbers to dimension values. Extracting these mappings is a core step in the engineering vision pipeline.
 
-Two parallel OCR tracks are used:
+Two OCR providers are supported (controlled by the `OCR_PROVIDER` environment variable):
 
-1. **[Tesseract](https://github.com/tesseract-ocr/tesseract) grid OCR** — morphological grid detection followed by per-cell Tesseract OCR (this document). Tesseract is an open-source OCR engine originally developed by HP and now maintained by Google; it converts images of text into machine-readable strings.
-2. **Vision LLM validation** — validates table dimensions against the drawing (see [LLM Validation](llm-extraction.md))
+1. **[Tesseract](https://github.com/tesseract-ocr/tesseract) grid OCR** (default) — morphological grid detection followed by per-cell Tesseract OCR (this document). Tesseract is an open-source OCR engine originally developed by HP and now maintained by Google; it converts images of text into machine-readable strings.
+2. **[Azure Document Intelligence](https://learn.microsoft.com/azure/ai-services/document-intelligence/)** (optional) — sends the full multi-page PDF in a single API call using the `prebuilt-layout` model, which detects tables and extracts cell contents natively. Set `OCR_PROVIDER=Azure` with `AZURE_DOCINT_ENDPOINT` and `AZURE_DOCINT_KEY` to enable.
+
+Additionally, **Vision LLM validation** validates table dimensions against the drawing (see [LLM Validation](llm-extraction.md)).
 
 Both tracks produce `balloon_number → dimension_text` dictionaries that are merged downstream in the [Pipeline Orchestration](pipeline.md) step.
 

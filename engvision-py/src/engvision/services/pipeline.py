@@ -26,6 +26,24 @@ class PipelineService:
         self._config = config
         self._tess_data_path = tess_data_path
 
+    def _create_ocr_services(self) -> tuple:
+        """Return (bubble_ocr, table_ocr) based on OCR_PROVIDER config.
+
+        When "Azure", uses Azure Document Intelligence services.
+        Otherwise falls back to local Tesseract.
+        """
+        if self._config.ocr_provider.lower() == "azure":
+            ep = self._config.azure_docint_endpoint
+            key = self._config.azure_docint_key
+            if not ep or not key:
+                print("  WARNING: OCR_PROVIDER=Azure but AZURE_DOCINT_ENDPOINT/KEY not set — falling back to Tesseract")
+                return BubbleOcrService(self._tess_data_path), TableOcrService(self._tess_data_path)
+            from .azure_bubble_ocr import AzureBubbleOcrService
+            from .azure_table_ocr import AzureTableOcrService
+            print(f"  Using Azure Document Intelligence for OCR ({ep})")
+            return AzureBubbleOcrService(ep, key), AzureTableOcrService(ep, key)
+        return BubbleOcrService(self._tess_data_path), TableOcrService(self._tess_data_path)
+
     async def run_async(
         self,
         pdf_path: str,
@@ -87,17 +105,22 @@ class PipelineService:
             # Step 2c: OCR bubble numbers
             progress("OCR-ing bubble numbers...")
             step_start = time.time()
-            ocr_service = BubbleOcrService(self._tess_data_path)
+            ocr_service, table_ocr = self._create_ocr_services()
             ocr_results = ocr_service.extract_all(raw_crops_dir)
 
             # Step 3: Table OCR (pages 2+)
             progress("OCR-ing table data...")
-            table_ocr = TableOcrService(self._tess_data_path)
             tesseract_dimensions: dict[int, str] = {}
-            for i in range(1, len(page_images)):
-                page_dims = table_ocr.extract_balloon_dimensions(page_images[i])
-                for num, dim in page_dims.items():
-                    tesseract_dimensions.setdefault(num, dim)
+
+            # Azure Doc Intelligence supports full-PDF mode for efficient table extraction
+            if hasattr(table_ocr, "extract_balloon_dimensions_from_pdf") and pdf_path:
+                with open(pdf_path, "rb") as f:
+                    tesseract_dimensions = table_ocr.extract_balloon_dimensions_from_pdf(f.read())
+            else:
+                for i in range(1, len(page_images)):
+                    page_dims = table_ocr.extract_balloon_dimensions(page_images[i])
+                    for num, dim in page_dims.items():
+                        tesseract_dimensions.setdefault(num, dim)
             ocr_ms = int((time.time() - step_start) * 1000)
 
             # Step 4: Trace leader lines from each bubble
@@ -510,7 +533,7 @@ class PipelineService:
                 crop = page_images[0][y1:y2, x1:x2]
                 cv2.imwrite(os.path.join(raw_crops_dir, f"bubble_{b['bubbleNumber']:03d}.png"), crop)
 
-            ocr_service = BubbleOcrService(self._tess_data_path)
+            ocr_service, table_ocr = self._create_ocr_services()
             ocr_results = ocr_service.extract_all(raw_crops_dir)
             detect_ms = int((time.time() - step_start) * 1000)
             yield {"type": "stepComplete", "step": 2, "name": "detect", "durationMs": detect_ms,
@@ -519,12 +542,17 @@ class PipelineService:
             # Step 3: Table OCR (pages 2+)
             yield {"type": "step", "step": 3, "totalSteps": 7, "name": "ocr", "message": "OCR-ing table data..."}
             step_start = time.time()
-            table_ocr = TableOcrService(self._tess_data_path)
             tesseract_dimensions: dict[int, str] = {}
-            for i in range(1, len(page_images)):
-                page_dims = table_ocr.extract_balloon_dimensions(page_images[i])
-                for num, dim in page_dims.items():
-                    tesseract_dimensions.setdefault(num, dim)
+
+            # Azure Doc Intelligence supports full-PDF mode for efficient table extraction
+            if hasattr(table_ocr, "extract_balloon_dimensions_from_pdf") and pdf_path:
+                with open(pdf_path, "rb") as f:
+                    tesseract_dimensions = table_ocr.extract_balloon_dimensions_from_pdf(f.read())
+            else:
+                for i in range(1, len(page_images)):
+                    page_dims = table_ocr.extract_balloon_dimensions(page_images[i])
+                    for num, dim in page_dims.items():
+                        tesseract_dimensions.setdefault(num, dim)
             ocr_ms = int((time.time() - step_start) * 1000)
             yield {"type": "stepComplete", "step": 3, "name": "ocr", "durationMs": ocr_ms,
                    "detail": {"dimensionCount": len(tesseract_dimensions)}}

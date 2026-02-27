@@ -8,7 +8,7 @@ namespace EngVision.Services;
 /// OCR service for extracting bubble numbers from tight bubble crop images.
 /// Preprocesses crops (remove blue circle, upscale, threshold) before Tesseract OCR.
 /// </summary>
-public class BubbleOcrService : IDisposable
+public class BubbleOcrService : IBubbleOcrService
 {
     private readonly Engine _engine;
 
