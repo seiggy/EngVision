@@ -35,14 +35,22 @@ public record DimensionMatch
 {
     public int BalloonNo { get; init; }
     public string? Dimension { get; init; }
-    public string Source { get; init; } = "None"; // "Tesseract", "LLM", "Both", "None"
+    public string Source { get; init; } = "None"; // "Table+Validated", "TableOnly", "None"
     public string? TesseractValue { get; init; }
-    public string? LlmValue { get; init; }
+    public string? LlmObservedValue { get; init; }
+    public bool? LlmMatches { get; init; }
+    public double LlmConfidence { get; init; }
+    public string? LlmNotes { get; init; }
     public bool HasConflict { get; init; }
     /// <summary>
-    /// Confidence score 0-1. 1.0 = exact match, 0.0 = missing/no match.
+    /// Confidence score 0-1. When LLM validated, this is the fuzzy match between
+    /// table value and LLM-observed value, or the LLM's own confidence.
     /// </summary>
     public double Confidence { get; init; }
+    /// <summary>
+    /// The capture box size that produced the final validation result (e.g. "128x128", "256x128").
+    /// </summary>
+    public string? CaptureSize { get; init; }
 }
 
 /// <summary>
@@ -53,6 +61,7 @@ public record ProcessingMetrics
     public long TotalDurationMs { get; init; }
     public long RenderDurationMs { get; init; }
     public long DetectDurationMs { get; init; }
+    public long TraceDurationMs { get; init; }
     public long OcrDurationMs { get; init; }
     public long LlmDurationMs { get; init; }
     public long MergeDurationMs { get; init; }

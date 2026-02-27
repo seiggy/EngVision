@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 @dataclass
 class EngVisionConfig:
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
+    openai_model: str = "gpt-5.3-codex"
     openai_endpoint: str | None = None
     pdf_render_dpi: int = 300
     output_directory: str = "Output"

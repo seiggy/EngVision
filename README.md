@@ -1,6 +1,6 @@
 # EngVision — CAD Dimensional Analysis Extraction
 
-A toolkit that detects numbered measurement bubbles and table regions in engineering CAD drawings (PDF), segments them into cropped images, and feeds them through a **vision LLM** (GPT-4o / GPT-5.2) to extract and cross-check dimensional data.
+A toolkit that detects numbered measurement bubbles and table regions in engineering CAD drawings (PDF), segments them into cropped images, and feeds them through a **vision LLM** (GPT-5.3-codex) to extract and cross-check dimensional data.
 
 Includes a **web-based annotation dashboard** for manually labeling ground truth bounding boxes, comparing against auto-detection, and computing precision/recall/F1 metrics to tune the detection pipeline.
 
@@ -83,7 +83,7 @@ Create a `.env` file in the repo root (or set the variables directly):
 ```env
 AZURE_ENDPOINT=https://your-openai-resource.cognitiveservices.azure.com
 AZURE_KEY=your-key-here
-AZURE_DEPLOYMENT_NAME=gpt-4o
+AZURE_DEPLOYMENT_NAME=gpt-5.3-codex
 ```
 
 Both backends read this file automatically.
@@ -127,11 +127,14 @@ The web dashboard (`EngVision.Web`) lets you:
 ## Detection Pipeline
 
 1. **PDF → Image**: Renders pages at 300 DPI
-2. **Bubble Detection**: Multi-pass HoughCircles + strict verification (white interior, dark text, visible outline)
-3. **Leader Line Tracing**: Follows leader lines from bubbles to find associated dimension text
-4. **Table Detection**: Morphological line detection for tabular data on pages 2-4
-5. **Vision LLM**: Feeds cropped segments to GPT-4o/5.2 for structured data extraction
-6. **Comparison**: Matches bubble measurements against table values
+2. **Bubble Detection**: Multi-pass [HoughCircles](https://docs.opencv.org/4.x/da/d53/tutorial_py_houghcircles.html) (detects circles via edge-pixel voting) + strict verification (white interior, dark text, visible outline)
+3. **Leader Line Tracing**: [Flood-fill](https://docs.opencv.org/4.x/d7/d1b/group__imgproc__misc.html#ga366aae45a6c1289b341d140c2c547f2f) (isolates connected pixels) + [Harris corner detection](https://docs.opencv.org/4.x/dc/d0d/tutorial_py_features_harris.html) (finds sharp corners) isolates triangle pointers from overlapping bubbles, determines leader direction
+4. **Capture Box Placement**: Progressive expansion (128×128 → 256×128 → 512×256 → 1024×512) along the leader direction with fixed-anchor centering
+5. **Table Detection**: [Morphological](https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html) line detection (erosion/dilation to isolate table grid lines) for tabular data on pages 2-4; [Tesseract](https://github.com/tesseract-ocr/tesseract) OCR extracts dimension values
+6. **Vision LLM Validation**: Sends cropped capture boxes to Azure OpenAI to confirm drawing annotations match table values; uses discovery mode when table OCR misses an entry
+7. **Result Merge**: Combines Tesseract + LLM results with source classification (`Table+Validated`, `TableOnly`, `LLMOnly`, `None`) and confidence scoring
+
+Real-time progress is streamed via **SSE** (Server-Sent Events) through the `/api/pipeline/run-stream` endpoints.
 
 ## API Endpoints
 
@@ -150,6 +153,8 @@ The web dashboard (`EngVision.Web`) lets you:
 | GET | `/api/pdfs/{file}/pages/{n}/accuracy` | Compute detection accuracy |
 | POST | `/api/pipeline/run` | Upload PDF and run full pipeline |
 | POST | `/api/pipeline/run-sample/{file}` | Run pipeline on a sample PDF |
+| POST | `/api/pipeline/run-stream` | Upload PDF and stream progress (SSE) |
+| POST | `/api/pipeline/run-stream-sample/{file}` | Stream pipeline progress for a sample (SSE) |
 | GET | `/api/pipeline/{runId}/results` | Get pipeline run results |
 | GET | `/api/pipeline/{runId}/pages/{n}/image` | Get rendered page from a run |
 | GET | `/api/pipeline/{runId}/pages/{n}/overlay` | Get annotated overlay image |

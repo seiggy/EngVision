@@ -58,17 +58,22 @@ export interface BubbleResult {
 export interface DimensionMatch {
   balloonNo: number;
   dimension: string | null;
-  source: string; // "Tesseract" | "LLM" | "Both" | "None"
+  source: string; // "Table+Validated" | "TableOnly" | "None"
   tesseractValue: string | null;
-  llmValue: string | null;
+  llmObservedValue: string | null;
+  llmMatches: boolean | null;
+  llmConfidence: number;
+  llmNotes: string | null;
   hasConflict: boolean;
   confidence: number; // 0-1, 1.0 = exact match
+  captureSize: string | null; // e.g. "128x128", "256x128"
 }
 
 export interface ProcessingMetrics {
   totalDurationMs: number;
   renderDurationMs: number;
   detectDurationMs: number;
+  traceDurationMs: number;
   ocrDurationMs: number;
   llmDurationMs: number;
   mergeDurationMs: number;
@@ -98,4 +103,67 @@ export interface PipelineResult {
   tokenUsage?: LlmTokenUsage;
   status: string;
   error?: string;
+}
+
+// ── SSE Pipeline Event Types ────────────────────────────────────────────────────
+
+export interface StepEvent {
+  type: 'step';
+  step: number;
+  totalSteps: number;
+  name: string;
+  message: string;
+}
+
+export interface StepCompleteEvent {
+  type: 'stepComplete';
+  step: number;
+  name: string;
+  durationMs: number;
+  detail?: Record<string, unknown>;
+}
+
+export interface BubbleEvent {
+  type: 'bubble';
+  bubbleNumber: number;
+  captureSize: string;
+  status: 'match' | 'expanding' | 'bestGuess' | 'noMatch' | 'discovered';
+  tableDim: string;
+  observed: string;
+  confidence: number;
+}
+
+export interface CompleteEvent {
+  type: 'complete';
+  result: PipelineResult;
+}
+
+export interface ErrorEvent {
+  type: 'error';
+  message: string;
+}
+
+export type PipelineSSEEvent =
+  | StepEvent
+  | StepCompleteEvent
+  | BubbleEvent
+  | CompleteEvent
+  | ErrorEvent;
+
+export interface PipelineStep {
+  step: number;
+  name: string;
+  message: string;
+  status: 'pending' | 'running' | 'complete';
+  durationMs?: number;
+  detail?: Record<string, unknown>;
+}
+
+export interface BubbleStatus {
+  bubbleNumber: number;
+  captureSize: string;
+  status: 'pending' | 'checking' | 'match' | 'expanding' | 'bestGuess' | 'noMatch' | 'discovered';
+  tableDim?: string;
+  observed?: string;
+  confidence?: number;
 }

@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, Component, type ReactNode, type ErrorInfo } from 'react';
 import PipelineCanvas from './PipelineCanvas';
 import PipelineDetailPanel from './PipelineDetailPanel';
+import PipelineProgressView from './PipelineProgressView';
+import { usePipelineStream } from '../hooks/usePipelineStream';
 import * as api from '../api';
 import type { PipelineResult } from '../types';
 
@@ -55,8 +57,6 @@ interface Props {
 
 export default function PipelineView({ samplePdfs }: Props) {
   const [result, setResult] = useState<PipelineResult | null>(null);
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState('');
   const [selectedBubble, setSelectedBubble] = useState<number | null>(null);
   const [showOverlay, setShowOverlay] = useState(true);
   const [pageNum, setPageNum] = useState(1);
@@ -64,52 +64,30 @@ export default function PipelineView({ samplePdfs }: Props) {
   const [thresholds, setThresholds] = useState({ error: 0.3, warning: 0.8 });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const stream = usePipelineStream();
+
+  // When stream completes, promote its result
+  const prevStreamResult = useRef<PipelineResult | null>(null);
+  if (stream.result && stream.result !== prevStreamResult.current) {
+    prevStreamResult.current = stream.result;
+    // Schedule state update outside render
+    queueMicrotask(() => {
+      setResult(stream.result);
+      setPageNum(1);
+    });
+  }
+
   const runOnFile = useCallback(async (file: File) => {
-    setRunning(true);
-    setProgress('Uploading PDF...');
     setResult(null);
     setSelectedBubble(null);
-    try {
-      setProgress('Running pipeline (this may take 30-60s)...');
-      const res = await api.runPipeline(file);
-      setResult(res);
-      setPageNum(1);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      setProgress(`Error: ${msg}`);
-      setResult({
-        runId: '', pdfFilename: file.name, pageCount: 0,
-        imageWidth: 0, imageHeight: 0, bubbles: [], dimensionMap: {},
-        totalBubbles: 0, matchedBubbles: 0, unmatchedBubbles: 0, warnings: 0,
-        status: 'error', error: msg,
-      });
-    } finally {
-      setRunning(false);
-    }
-  }, []);
+    stream.runStream('upload', file);
+  }, [stream.runStream]);
 
   const runOnSample = useCallback(async (filename: string) => {
-    setRunning(true);
-    setProgress('Running pipeline on sample PDF...');
     setResult(null);
     setSelectedBubble(null);
-    try {
-      const res = await api.runPipelineSample(filename);
-      setResult(res);
-      setPageNum(1);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      setProgress(`Error: ${msg}`);
-      setResult({
-        runId: '', pdfFilename: filename, pageCount: 0,
-        imageWidth: 0, imageHeight: 0, bubbles: [], dimensionMap: {},
-        totalBubbles: 0, matchedBubbles: 0, unmatchedBubbles: 0, warnings: 0,
-        status: 'error', error: msg,
-      });
-    } finally {
-      setRunning(false);
-    }
-  }, []);
+    stream.runStream('sample', filename);
+  }, [stream.runStream]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -125,10 +103,9 @@ export default function PipelineView({ samplePdfs }: Props) {
 
   const handleReset = useCallback(() => {
     setResult(null);
-    setRunning(false);
-    setProgress('');
+    stream.stop();
     setSelectedBubble(null);
-  }, []);
+  }, [stream.stop]);
 
   const imageUrl = result
     ? api.getPipelinePageImageUrl(result.runId, pageNum)
@@ -150,7 +127,7 @@ export default function PipelineView({ samplePdfs }: Props) {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={running}
+            disabled={stream.running}
             style={btnStyle}
           >
             📁 Upload PDF
@@ -165,7 +142,7 @@ export default function PipelineView({ samplePdfs }: Props) {
 
           {samplePdfs.length > 0 && (
             <select
-              disabled={running}
+              disabled={stream.running}
               onChange={e => { if (e.target.value) runOnSample(e.target.value); }}
               style={{ ...selectStyle, minWidth: 200 }}
               defaultValue=""
@@ -176,10 +153,12 @@ export default function PipelineView({ samplePdfs }: Props) {
           )}
         </div>
 
-        {running && (
+        {stream.running && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#f59e0b' }}>
             <Spinner />
-            <span style={{ fontSize: 13 }}>{progress}</span>
+            <span style={{ fontSize: 13 }}>
+              {stream.steps.find(s => s.status === 'running')?.message || 'Processing...'}
+            </span>
           </div>
         )}
 
@@ -247,11 +226,19 @@ export default function PipelineView({ samplePdfs }: Props) {
               display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
               height: '100%', color: '#8b949e',
             }}>
-              {running ? (
-                <div style={{ textAlign: 'center' }}>
-                  <Spinner size={48} />
-                  <p style={{ marginTop: 16, fontSize: 16 }}>{progress}</p>
-                </div>
+              {stream.running ? (
+                <PipelineProgressView
+                  steps={stream.steps}
+                  bubbleStatuses={stream.bubbleStatuses}
+                  currentBubble={stream.currentBubble}
+                  elapsedMs={stream.elapsedMs}
+                  llmCalls={stream.llmCalls}
+                  totalBubbles={
+                    stream.steps.find(s => s.name === 'Detect bubbles' && s.status === 'complete')
+                      ?.detail?.bubbleCount as number ?? 0
+                  }
+                  error={stream.error}
+                />
               ) : result?.status === 'error' ? (
                 <div style={{ textAlign: 'center', color: '#ef4444' }}>
                   <p style={{ fontSize: 48, margin: 0 }}>⚠</p>

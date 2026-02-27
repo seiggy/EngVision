@@ -428,3 +428,8 @@ pyrightconfig.json
 sample_docs/
 **/bin
 engvision-py/Output
+
+Output/
+
+EngVision/tessdata
+engvision-py/pipeline_runs

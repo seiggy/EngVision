@@ -6,13 +6,14 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.responses import StreamingResponse
 
 from .annotation_store import AnnotationStore
 from .config import EngVisionConfig
@@ -294,6 +295,59 @@ async def run_pipeline_sample(filename: str):
     return result
 
 
+# ── Pipeline: SSE stream for uploaded PDF ───────────────────────────────────────
+@app.post("/api/pipeline/run-stream")
+async def run_pipeline_stream(pdf: UploadFile = File(...)):
+    if not pdf.filename:
+        raise HTTPException(400, "No PDF file provided")
+
+    run_id = uuid.uuid4().hex[:8]
+    pdf_path = os.path.join(uploads_dir, f"{run_id}_{pdf.filename}")
+    with open(pdf_path, "wb") as f:
+        f.write(await pdf.read())
+
+    run_output_dir = os.path.join(pipeline_output_dir, run_id)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        async for event in pipeline_service.run_stream(pdf_path, run_id, run_output_dir):
+            event_type = event.get("type", "message")
+            data = json.dumps(event)
+            yield f"event: {event_type}\ndata: {data}\n\n"
+            if event_type == "complete":
+                pipeline_runs[run_id] = event.get("result", {})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+# ── Pipeline: SSE stream for sample PDF ─────────────────────────────────────────
+@app.post("/api/pipeline/run-stream-sample/{filename}")
+async def run_pipeline_stream_sample(filename: str):
+    pdf_path = os.path.join(sample_dir, filename)
+    if not os.path.exists(pdf_path):
+        raise HTTPException(404, "PDF not found")
+
+    run_id = uuid.uuid4().hex[:8]
+    run_output_dir = os.path.join(pipeline_output_dir, run_id)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        async for event in pipeline_service.run_stream(pdf_path, run_id, run_output_dir):
+            event_type = event.get("type", "message")
+            data = json.dumps(event)
+            yield f"event: {event_type}\ndata: {data}\n\n"
+            if event_type == "complete":
+                pipeline_runs[run_id] = event.get("result", {})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
 # ── Pipeline: Get run result ────────────────────────────────────────────────────
 @app.get("/api/pipeline/{run_id}/results")
 def get_pipeline_results(run_id: str):
@@ -320,6 +374,37 @@ def get_pipeline_overlay(run_id: str, page_num: int):
     if not os.path.exists(img_path):
         raise HTTPException(404)
     return FileResponse(img_path, media_type="image/png")
+
+
+# ── Pipeline: Get capture crop for a bubble ─────────────────────────────────────
+@app.get("/api/pipeline/{run_id}/bubbles/{bubble_no}/capture")
+def get_bubble_capture(run_id: str, bubble_no: int, size: str | None = None):
+    debug_dir = os.path.join(pipeline_output_dir, run_id, "debug")
+    if size:
+        img_path = os.path.join(debug_dir, f"capture_bubble_{bubble_no:03d}_{size}.png")
+    else:
+        # Serve the largest available capture (last tried = best context)
+        img_path = None
+        for cap_w, cap_h in reversed([(128, 128), (256, 128), (512, 256), (1024, 512)]):
+            candidate = os.path.join(debug_dir, f"capture_bubble_{bubble_no:03d}_{cap_w}x{cap_h}.png")
+            if os.path.exists(candidate):
+                img_path = candidate
+                break
+    if not img_path or not os.path.exists(img_path):
+        raise HTTPException(404)
+    return FileResponse(img_path, media_type="image/png")
+
+
+# ── Pipeline: List all capture sizes for a bubble ───────────────────────────────
+@app.get("/api/pipeline/{run_id}/bubbles/{bubble_no}/captures")
+def list_bubble_captures(run_id: str, bubble_no: int):
+    debug_dir = os.path.join(pipeline_output_dir, run_id, "debug")
+    sizes = []
+    for cap_w, cap_h in [(128, 128), (256, 128), (512, 256), (1024, 512)]:
+        fname = f"capture_bubble_{bubble_no:03d}_{cap_w}x{cap_h}.png"
+        if os.path.exists(os.path.join(debug_dir, fname)):
+            sizes.append({"size": f"{cap_w}x{cap_h}", "width": cap_w, "height": cap_h})
+    return sizes
 
 
 # ── Pipeline: List all runs ─────────────────────────────────────────────────────

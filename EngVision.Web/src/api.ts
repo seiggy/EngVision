@@ -139,3 +139,8 @@ export function getPipelinePageImageUrl(runId: string, pageNum: number): string 
 export function getPipelineOverlayUrl(runId: string, pageNum: number): string {
   return `${BASE}/pipeline/${runId}/pages/${pageNum}/overlay`;
 }
+
+export function getBubbleCaptureUrl(runId: string, bubbleNo: number, size?: string): string {
+  const url = `${BASE}/pipeline/${runId}/bubbles/${bubbleNo}/capture`;
+  return size ? `${url}?size=${size}` : url;
+}

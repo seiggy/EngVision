@@ -325,6 +325,37 @@ app.MapGet("/api/pipeline/{runId}/pages/{pageNum}/overlay", (string runId, int p
     return File.Exists(imgPath) ? Results.File(imgPath, "image/png") : Results.NotFound();
 });
 
+// ── Pipeline: Get capture crop for a bubble ───────────────────────────────────
+app.MapGet("/api/pipeline/{runId}/bubbles/{bubbleNo}/capture", (string runId, int bubbleNo, string? size) =>
+{
+    var debugDir = Path.Combine(pipelineOutputDir, runId, "debug");
+    if (!string.IsNullOrEmpty(size))
+    {
+        var imgPath = Path.Combine(debugDir, $"capture_bubble_{bubbleNo:D3}_{size}.png");
+        return File.Exists(imgPath) ? Results.File(imgPath, "image/png") : Results.NotFound();
+    }
+    // Serve the largest available capture
+    var sizes = new[] { (1024, 512), (512, 256), (256, 128), (128, 128) };
+    foreach (var (w, h) in sizes)
+    {
+        var candidate = Path.Combine(debugDir, $"capture_bubble_{bubbleNo:D3}_{w}x{h}.png");
+        if (File.Exists(candidate))
+            return Results.File(candidate, "image/png");
+    }
+    return Results.NotFound();
+});
+
+// ── Pipeline: List all capture sizes for a bubble ─────────────────────────────
+app.MapGet("/api/pipeline/{runId}/bubbles/{bubbleNo}/captures", (string runId, int bubbleNo) =>
+{
+    var debugDir = Path.Combine(pipelineOutputDir, runId, "debug");
+    var sizes = new (int W, int H)[] { (128, 128), (256, 128), (512, 256), (1024, 512) };
+    var available = sizes
+        .Where(s => File.Exists(Path.Combine(debugDir, $"capture_bubble_{bubbleNo:D3}_{s.W}x{s.H}.png")))
+        .Select(s => new { size = $"{s.W}x{s.H}", width = s.W, height = s.H });
+    return Results.Ok(available);
+});
+
 // ── Pipeline: List all runs ────────────────────────────────────────────────────
 app.MapGet("/api/pipeline/runs", () =>
 {
@@ -340,6 +371,83 @@ app.MapGet("/api/pipeline/runs", () =>
             r.Status
         });
     return Results.Ok(runs);
+});
+
+// ── Pipeline: SSE streaming run (uploaded PDF) ─────────────────────────────────
+app.MapPost("/api/pipeline/run-stream", async (HttpRequest request, PipelineService pipeline, HttpContext context) =>
+{
+    if (!request.HasFormContentType)
+    {
+        context.Response.StatusCode = 400;
+        await context.Response.WriteAsync("Expected multipart/form-data with a PDF file");
+        return;
+    }
+
+    var form = await request.ReadFormAsync();
+    var file = form.Files.GetFile("pdf");
+    if (file is null || file.Length == 0)
+    {
+        context.Response.StatusCode = 400;
+        await context.Response.WriteAsync("No PDF file provided");
+        return;
+    }
+
+    var runId = Guid.NewGuid().ToString("N")[..8];
+    var pdfPath = Path.Combine(uploadsDir, $"{runId}_{file.FileName}");
+    await using (var stream = File.Create(pdfPath))
+        await file.CopyToAsync(stream);
+
+    var runOutputDir = Path.Combine(pipelineOutputDir, runId);
+
+    context.Response.ContentType = "text/event-stream";
+    context.Response.Headers["Cache-Control"] = "no-cache";
+    context.Response.Headers["Connection"] = "keep-alive";
+
+    var sseJsonOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+    await foreach (var evt in pipeline.RunStreamAsync(pdfPath, runId, runOutputDir))
+    {
+        var eventType = evt["type"]?.ToString() ?? "message";
+        var json = JsonSerializer.Serialize(evt, sseJsonOpts);
+        await context.Response.WriteAsync($"event: {eventType}\ndata: {json}\n\n");
+        await context.Response.Body.FlushAsync();
+
+        // Store result on completion
+        if (eventType == "complete" && evt.TryGetValue("result", out var resultObj) && resultObj is PipelineResult result)
+            pipelineRuns[runId] = result;
+    }
+}).DisableAntiforgery();
+
+// ── Pipeline: SSE streaming run (sample PDF) ───────────────────────────────────
+app.MapPost("/api/pipeline/run-stream-sample/{filename}", async (string filename, PipelineService pipeline, HttpContext context) =>
+{
+    var pdfPath = Path.Combine(sampleDir, filename);
+    if (!File.Exists(pdfPath))
+    {
+        context.Response.StatusCode = 404;
+        await context.Response.WriteAsync("PDF not found");
+        return;
+    }
+
+    var runId = Guid.NewGuid().ToString("N")[..8];
+    var runOutputDir = Path.Combine(pipelineOutputDir, runId);
+
+    context.Response.ContentType = "text/event-stream";
+    context.Response.Headers["Cache-Control"] = "no-cache";
+    context.Response.Headers["Connection"] = "keep-alive";
+
+    var sseJsonOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+    await foreach (var evt in pipeline.RunStreamAsync(pdfPath, runId, runOutputDir))
+    {
+        var eventType = evt["type"]?.ToString() ?? "message";
+        var json = JsonSerializer.Serialize(evt, sseJsonOpts);
+        await context.Response.WriteAsync($"event: {eventType}\ndata: {json}\n\n");
+        await context.Response.Body.FlushAsync();
+
+        if (eventType == "complete" && evt.TryGetValue("result", out var resultObj) && resultObj is PipelineResult result)
+            pipelineRuns[runId] = result;
+    }
 });
 
 app.Run();

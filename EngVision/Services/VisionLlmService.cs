@@ -5,8 +5,10 @@ using OpenAI.Responses;
 namespace EngVision.Services;
 
 /// <summary>
-/// Uses the OpenAI Responses API to extract structured measurement data
-/// from cropped image segments via vision capabilities.
+/// Uses the OpenAI Responses API to validate that dimension annotations on the
+/// engineering drawing match the table values extracted by Tesseract OCR.
+/// For each bubble, the pipeline crops the drawing region the leader line points to
+/// and sends that crop along with the table dimension text for validation.
 /// </summary>
 public class VisionLlmService
 {
@@ -20,6 +22,105 @@ public class VisionLlmService
     public VisionLlmService(ResponsesClient client)
     {
         _client = client;
+    }
+
+    /// <summary>
+    /// Result of validating a single bubble's dimension against the drawing.
+    /// </summary>
+    public record LlmValidationResult(
+        int BalloonNo,
+        string TableDimension,
+        string ObservedDimension,
+        bool Matches,
+        double Confidence,
+        string Notes,
+        int InputTokens,
+        int OutputTokens,
+        int TotalTokens);
+
+    /// <summary>
+    /// Validates that the dimension on the drawing matches the table value.
+    /// </summary>
+    /// <param name="cropImageBytes">PNG bytes of the drawing region the bubble points to.</param>
+    /// <param name="balloonNo">The bubble/balloon number.</param>
+    /// <param name="tableDimension">The dimension string extracted from the table by Tesseract.</param>
+    public async Task<LlmValidationResult> ValidateDimension(byte[] cropImageBytes, int balloonNo, string tableDimension)
+    {
+        var options = new CreateResponseOptions
+        {
+            Instructions = """
+                You are an expert at reading engineering drawings and dimensional annotations.
+
+                You will be given:
+                1. A cropped region from an engineering drawing where a numbered balloon/bubble
+                   points via its leader line.
+                2. A dimension value extracted from the inspection table for that balloon number.
+
+                Your job is to:
+                - Examine the cropped drawing region and find the dimension annotation visible there.
+                - Compare it to the table dimension value provided.
+                - Determine if they match (accounting for formatting differences like leading zeros,
+                  degree symbols, diameter symbols, etc.).
+
+                Return a JSON object:
+                {
+                    "observedDimension": "<the dimension text you see on the drawing, or empty string if none visible>",
+                    "matches": <true if the drawing dimension matches the table value, false otherwise>,
+                    "confidence": <0.0 to 1.0 confidence in your assessment>,
+                    "notes": "<brief explanation, e.g. 'exact match', 'formatting difference only', 'dimension not visible in crop', etc.>"
+                }
+
+                Rules:
+                - If you cannot see any dimension annotation in the crop, set observedDimension to ""
+                  and matches to false with a low confidence.
+                - Treat formatting variations as matches (e.g. '0.81' vs '.81', '18°' vs '18 DEG',
+                  'Ø.500' vs 'DIA .500').
+                - Return ONLY the JSON object, no other text.
+                """
+        };
+
+        var contentParts = new List<ResponseContentPart>
+        {
+            ResponseContentPart.CreateInputTextPart(
+                $"Balloon #{balloonNo}\nTable dimension value: \"{tableDimension}\"\n\n" +
+                "Examine the drawing region below and validate whether the dimension annotation matches the table value:"),
+            ResponseContentPart.CreateInputImagePart(BinaryData.FromBytes(cropImageBytes), "image/png")
+        };
+        options.InputItems.Add(ResponseItem.CreateUserMessageItem(contentParts));
+
+        try
+        {
+            var response = await _client.CreateResponseAsync(options);
+            var content = GetOutputText(response.Value);
+            var usage = response.Value.Usage;
+            int inputTokens = usage?.InputTokenCount ?? 0;
+            int outputTokens = usage?.OutputTokenCount ?? 0;
+            int totalTokens = usage?.TotalTokenCount ?? 0;
+
+            if (string.IsNullOrEmpty(content))
+                return new LlmValidationResult(balloonNo, tableDimension, "", false, 0.0, "", inputTokens, outputTokens, totalTokens);
+
+            content = StripCodeFences(content);
+            var parsed = JsonSerializer.Deserialize<ValidationResponse>(content, _jsonOptions);
+            if (parsed is null)
+                return new LlmValidationResult(balloonNo, tableDimension, "", false, 0.0, "", inputTokens, outputTokens, totalTokens);
+
+            return new LlmValidationResult(
+                balloonNo,
+                tableDimension,
+                parsed.ObservedDimension ?? "",
+                parsed.Matches,
+                parsed.Confidence,
+                parsed.Notes ?? "",
+                inputTokens,
+                outputTokens,
+                totalTokens);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error validating balloon #{balloonNo}: {ex.Message}");
+            return new LlmValidationResult(balloonNo, tableDimension, "", false, 0.0, "", 0, 0, 0);
+        }
     }
 
     /// <summary>
@@ -155,45 +256,45 @@ public class VisionLlmService
         }
     }
 
-    /// <summary>
-    /// Result of an LLM extraction call, including token usage.
-    /// </summary>
-    public record LlmExtractionResult(Dictionary<int, string> Dimensions, int InputTokens, int OutputTokens, int TotalTokens);
+    private record ValidationResponse(string? ObservedDimension, bool Matches, double Confidence, string? Notes);
+    private record DiscoveryResponse(string? ObservedDimension, double Confidence, string? Notes);
 
     /// <summary>
-    /// Extracts balloon number → dimension text mapping from a full table page image.
-    /// Focused extraction: just the two key columns. Returns token usage data.
+    /// Discovers the dimension annotation in a crop when no table value exists.
+    /// Used as a fallback when the table OCR fails to extract a dimension.
     /// </summary>
-    public async Task<LlmExtractionResult> ExtractBalloonDimensionsWithUsage(byte[] pageImageBytes, int pageNumber)
+    public async Task<LlmValidationResult> DiscoverDimension(byte[] cropImageBytes, int balloonNo)
     {
         var options = new CreateResponseOptions
         {
             Instructions = """
-                You are an expert at reading engineering dimensional analysis tables.
-                This image shows a page from a dimensional analysis report.
-                
-                The table has columns including "BALLOON NO." (or "SN") and "DIMENSION".
-                Extract EVERY row's balloon number and dimension value.
-                
-                Return a JSON array of objects:
-                [
-                    { "balloonNo": <integer>, "dimension": "<dimension text exactly as shown>" }
-                ]
-                
+                You are an expert at reading engineering drawings and dimensional annotations.
+
+                You will be given a cropped region from an engineering drawing where a numbered
+                balloon/bubble points via its leader line.
+
+                Your job is to find and read the dimension annotation visible in the crop.
+
+                Return a JSON object:
+                {
+                    "observedDimension": "<the dimension text you see on the drawing, or empty string if none visible>",
+                    "confidence": <0.0 to 1.0 confidence in your reading>,
+                    "notes": "<brief description of what you see>"
+                }
+
                 Rules:
-                - Include ALL rows, even if some cells are hard to read
-                - The balloon number is always an integer (2 through 51)
-                - The dimension text should be copied exactly as shown (e.g., "0.81", "18°", "Ø.500", "MATERIAL")
-                - If a row has sub-rows or multiple dimension values, include each as a separate entry
-                - Do NOT skip any rows
-                - Return ONLY the JSON array, no other text
+                - If you cannot see any dimension annotation, set observedDimension to ""
+                  with a low confidence.
+                - Include the full dimension text with any symbols (Ø, °, ±, etc.).
+                - Return ONLY the JSON object, no other text.
                 """
         };
 
         var contentParts = new List<ResponseContentPart>
         {
-            ResponseContentPart.CreateInputTextPart($"Extract all balloon number and dimension pairs from this table page (page {pageNumber}):"),
-            ResponseContentPart.CreateInputImagePart(BinaryData.FromBytes(pageImageBytes), "image/png")
+            ResponseContentPart.CreateInputTextPart(
+                $"Balloon #{balloonNo}\n\nRead the dimension annotation visible in this drawing region:"),
+            ResponseContentPart.CreateInputImagePart(BinaryData.FromBytes(cropImageBytes), "image/png")
         };
         options.InputItems.Add(ResponseItem.CreateUserMessageItem(contentParts));
 
@@ -207,39 +308,31 @@ public class VisionLlmService
             int totalTokens = usage?.TotalTokenCount ?? 0;
 
             if (string.IsNullOrEmpty(content))
-                return new LlmExtractionResult(new(), inputTokens, outputTokens, totalTokens);
+                return new LlmValidationResult(balloonNo, "", "", false, 0.0, "", inputTokens, outputTokens, totalTokens);
 
             content = StripCodeFences(content);
+            var parsed = JsonSerializer.Deserialize<DiscoveryResponse>(content, _jsonOptions);
+            if (parsed is null)
+                return new LlmValidationResult(balloonNo, "", "", false, 0.0, "", inputTokens, outputTokens, totalTokens);
 
-            var rows = JsonSerializer.Deserialize<List<BalloonDimensionRow>>(content, _jsonOptions);
-            if (rows is null)
-                return new LlmExtractionResult(new(), inputTokens, outputTokens, totalTokens);
-
-            var result = new Dictionary<int, string>();
-            foreach (var row in rows)
-            {
-                if (row.BalloonNo > 0 && !string.IsNullOrWhiteSpace(row.Dimension))
-                    result.TryAdd(row.BalloonNo, row.Dimension.Trim());
-            }
-            return new LlmExtractionResult(result, inputTokens, outputTokens, totalTokens);
+            var observed = parsed.ObservedDimension ?? "";
+            return new LlmValidationResult(
+                balloonNo,
+                "",
+                observed,
+                !string.IsNullOrEmpty(observed), // treat as "match" if we see something
+                parsed.Confidence,
+                parsed.Notes ?? "",
+                inputTokens,
+                outputTokens,
+                totalTokens);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  Error extracting balloon dimensions from page {pageNumber}: {ex.Message}");
-            return new LlmExtractionResult(new(), 0, 0, 0);
+            Console.WriteLine($"  Error discovering dimension for balloon #{balloonNo}: {ex.Message}");
+            return new LlmValidationResult(balloonNo, "", "", false, 0.0, "", 0, 0, 0);
         }
     }
-
-    /// <summary>
-    /// Backwards-compatible wrapper that returns just the dimensions dictionary.
-    /// </summary>
-    public async Task<Dictionary<int, string>> ExtractBalloonDimensions(byte[] pageImageBytes, int pageNumber)
-    {
-        var result = await ExtractBalloonDimensionsWithUsage(pageImageBytes, pageNumber);
-        return result.Dimensions;
-    }
-
-    private record BalloonDimensionRow(int BalloonNo, string Dimension);
 
     private static string GetOutputText(ResponseResult response)
     {

@@ -6,7 +6,7 @@ namespace EngVision.Models;
 public class EngVisionConfig
 {
     public string OpenAIApiKey { get; set; } = string.Empty;
-    public string OpenAIModel { get; set; } = "gpt-4o";
+    public string OpenAIModel { get; set; } = "gpt-5.3-codex";
     public string? OpenAIEndpoint { get; set; }
     public int PdfRenderDpi { get; set; } = 300;
     public string OutputDirectory { get; set; } = "Output";

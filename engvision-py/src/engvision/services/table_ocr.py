@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 
 import cv2
 import numpy as np
 import pytesseract
+
+# Auto-detect Tesseract on Windows if not already on PATH
+if not shutil.which("tesseract"):
+    _win_default = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.isfile(_win_default):
+        pytesseract.pytesseract.tesseract_cmd = _win_default
 
 
 class TableOcrService:

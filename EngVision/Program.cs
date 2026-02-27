@@ -42,7 +42,7 @@ var config = new EngVisionConfig
     OpenAIApiKey = Environment.GetEnvironmentVariable("AZURE_KEY")
         ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "",
     OpenAIModel = Environment.GetEnvironmentVariable("AZURE_DEPLOYMENT_NAME")
-        ?? Environment.GetEnvironmentVariable("OPENAI_MODEL") ?? "gpt-4o",
+        ?? Environment.GetEnvironmentVariable("OPENAI_MODEL") ?? "gpt-5.3-codex",
     OpenAIEndpoint = Environment.GetEnvironmentVariable("AZURE_ENDPOINT")
         ?? Environment.GetEnvironmentVariable("OPENAI_ENDPOINT"),
     PdfRenderDpi = 300,
@@ -405,11 +405,11 @@ if (File.Exists(gtPath))
     }
 }
 
-// ── Step 6: Vision LLM table extraction (if API key is configured) ─────────────
+// ── Step 6: Vision LLM dimension validation (if API key is configured) ─────────
 if (string.IsNullOrEmpty(config.OpenAIApiKey))
 {
-    Console.WriteLine("Step 6: SKIPPED - Set AZURE_KEY environment variable to enable vision LLM extraction");
-    Console.WriteLine("  Using Tesseract OCR data only for validation.\n");
+    Console.WriteLine("Step 6: SKIPPED - Set AZURE_KEY environment variable to enable vision LLM validation");
+    Console.WriteLine("  Using Tesseract OCR data only.\n");
 
     // ── Step 7: Validate with OCR-only data ──────────────────────────────────────
     Console.WriteLine("Step 7: Validation report (Tesseract OCR only)...");
@@ -417,7 +417,14 @@ if (string.IsNullOrEmpty(config.OpenAIApiKey))
 }
 else
 {
-    Console.WriteLine($"Step 6: Vision LLM table extraction via {config.OpenAIModel}...");
+    // Step 6a: Trace leader lines to find where each bubble points
+    Console.WriteLine("Step 6a: Tracing leader lines...");
+    var tracer = new LeaderLineTracerService();
+    var expandedBubbles = tracer.TraceAndExpand(bubbles, pageImages[0]);
+    Console.WriteLine($"  Expanded {expandedBubbles.Count} bubble regions with leader line targets\n");
+
+    // Step 6b: Validate table dimensions against drawing using Vision LLM
+    Console.WriteLine($"Step 6b: Vision LLM dimension validation via {config.OpenAIModel}...");
 
     ResponsesClient responsesClient;
     if (!string.IsNullOrEmpty(config.OpenAIEndpoint))
@@ -435,72 +442,71 @@ else
 
     var visionService = new VisionLlmService(responsesClient);
 
-    // Send each table page image to the LLM for balloon→dimension extraction
-    var llmDimensions = new Dictionary<int, string>();
-    for (int i = 1; i < pageImages.Count; i++)
+    // Build lookup from bubble index → expanded region
+    var expandedByIdx = new Dictionary<int, DetectedRegion>();
+    for (int i = 0; i < expandedBubbles.Count; i++)
+        expandedByIdx[i] = expandedBubbles[i];
+
+    int imgW = pageImages[0].Width, imgH = pageImages[0].Height;
+    int validated = 0, mismatches = 0, skipped = 0;
+
+    // For each bubble with a table dimension, crop the drawing and validate
+    foreach (var (file, number) in ocrResults)
     {
-        var pageNum = i + 1;
-        Console.Write($"  Page {pageNum}...");
+        if (!number.HasValue) continue;
+        int cropIdx = int.Parse(Path.GetFileNameWithoutExtension(file).Replace("bubble_", "")) - 1;
+        if (cropIdx < 0 || cropIdx >= bubbles.Count) continue;
 
-        // Encode page image to PNG bytes
-        var pageBytes = pageImages[i].ToBytes(".png");
-        var pageDims = await visionService.ExtractBalloonDimensions(pageBytes, pageNum);
+        var tableDim = balloonDimensions.GetValueOrDefault(number.Value);
+        if (tableDim is null) { skipped++; continue; }
 
-        foreach (var (num, dim) in pageDims.OrderBy(kv => kv.Key))
+        if (!expandedByIdx.TryGetValue(cropIdx, out var eb)) { skipped++; continue; }
+        if (eb.CaptureBox is null) { skipped++; continue; }
+        var cap = eb.CaptureBox;
+        int x1 = Math.Max(0, cap.X), y1 = Math.Max(0, cap.Y);
+        int x2 = Math.Min(imgW, cap.X + cap.Width), y2 = Math.Min(imgH, cap.Y + cap.Height);
+        if (x2 - x1 < 4 || y2 - y1 < 4) { skipped++; continue; }
+        using var regionCrop = new Mat(pageImages[0], new Rect(x1, y1, x2 - x1, y2 - y1));
+        var cropBytes = regionCrop.ToBytes(".png");
+
+        var validation = await visionService.ValidateDimension(cropBytes, number.Value, tableDim);
+        validated++;
+
+        if (validation.Matches)
         {
-            llmDimensions.TryAdd(num, dim);
+            Console.WriteLine($"  ✓ #{number.Value}: table=\"{tableDim}\" matches drawing (confidence={validation.Confidence:P0})");
         }
-        Console.WriteLine($" {pageDims.Count} balloon→dimension pairs");
-    }
-    Console.WriteLine($"  LLM total: {llmDimensions.Count} balloon→dimension mappings\n");
-
-    // ── Step 6b: Merge Tesseract OCR + LLM results ───────────────────────────────
-    Console.WriteLine("Step 6b: Merging Tesseract OCR + Vision LLM results...");
-    var mergedDimensions = new Dictionary<int, string>(balloonDimensions); // start with Tesseract
-    int llmFills = 0, llmConflicts = 0;
-    foreach (var (num, dim) in llmDimensions)
-    {
-        if (!mergedDimensions.ContainsKey(num))
+        else
         {
-            mergedDimensions[num] = dim;
-            llmFills++;
-            Console.WriteLine($"  + LLM filled gap: #{num} → \"{dim}\"");
+            mismatches++;
+            Console.WriteLine($"  ✗ #{number.Value}: table=\"{tableDim}\" vs drawing=\"{validation.ObservedDimension}\" — {validation.Notes}");
         }
-        else if (!DimensionMatcher.AreSimilar(mergedDimensions[num], dim))
+
+        // Update bubbleMap with validation info
+        if (bubbleMap.TryGetValue(number.Value, out var info))
         {
-            llmConflicts++;
-            Console.WriteLine($"  ~ Conflict #{num}: Tesseract=\"{mergedDimensions[num]}\" vs LLM=\"{dim}\" (keeping Tesseract)");
+            bubbleMap[number.Value] = (info.Cx, info.Cy, info.Radius, info.Dimension);
         }
     }
-    Console.WriteLine($"  Merged: {mergedDimensions.Count} total ({llmFills} LLM fills, {llmConflicts} conflicts)\n");
+    Console.WriteLine($"  Validated: {validated}, Mismatches: {mismatches}, Skipped: {skipped}\n");
 
-    // Update bubbleMap with merged dimensions
-    var mergedBubbleMap = new Dictionary<int, (int Cx, int Cy, int Radius, string? Dimension)>();
-    foreach (var (num, info) in bubbleMap)
-    {
-        var dim = mergedDimensions.GetValueOrDefault(num);
-        mergedBubbleMap[num] = (info.Cx, info.Cy, info.Radius, dim ?? info.Dimension);
-    }
-
-    // Save merged data
-    var mergedPath = Path.Combine(config.OutputDirectory, "merged_balloon_dimensions.json");
-    var mergedData = mergedBubbleMap.OrderBy(kv => kv.Key).Select(kv => new
+    // Save validation results
+    var validatedPath = Path.Combine(config.OutputDirectory, "validated_balloon_dimensions.json");
+    var validatedData = bubbleMap.OrderBy(kv => kv.Key).Select(kv => new
     {
         BalloonNo = kv.Key,
         kv.Value.Cx,
         kv.Value.Cy,
         kv.Value.Radius,
         kv.Value.Dimension,
-        Source = balloonDimensions.ContainsKey(kv.Key)
-            ? (llmDimensions.ContainsKey(kv.Key) ? "Both" : "Tesseract")
-            : (llmDimensions.ContainsKey(kv.Key) ? "LLM" : "None")
+        Source = balloonDimensions.ContainsKey(kv.Key) ? "Table" : "None"
     });
-    await File.WriteAllTextAsync(mergedPath, JsonSerializer.Serialize(mergedData, jsonOptions));
-    Console.WriteLine($"  Merged data saved to: {mergedPath}\n");
+    await File.WriteAllTextAsync(validatedPath, JsonSerializer.Serialize(validatedData, jsonOptions));
+    Console.WriteLine($"  Validated data saved to: {validatedPath}\n");
 
     // ── Step 7: Validation report ────────────────────────────────────────────────
-    Console.WriteLine("Step 7: Validation report (merged OCR + LLM)...");
-    PrintValidationReport(mergedBubbleMap);
+    Console.WriteLine("Step 7: Validation report (Table OCR + LLM validated)...");
+    PrintValidationReport(bubbleMap);
 }
 
 // Cleanup

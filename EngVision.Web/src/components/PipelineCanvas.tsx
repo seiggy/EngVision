@@ -177,10 +177,11 @@ export default function PipelineCanvas({
         ctx.fillText(label, bubble.cx, bubble.cy - radius - 6 / scale);
 
         // Dimension text label (right side)
-        if (match?.dimension) {
-          const dimText = match.dimension.length > 25
-            ? match.dimension.slice(0, 25) + '…'
-            : match.dimension;
+        const dimDisplay = match?.dimension ?? match?.llmObservedValue;
+        if (dimDisplay) {
+          const dimText = dimDisplay.length > 25
+            ? dimDisplay.slice(0, 25) + '…'
+            : dimDisplay;
 
           // Background pill for readability
           ctx.font = `${Math.max(11, 11 / scale)}px sans-serif`;
@@ -206,9 +207,8 @@ export default function PipelineCanvas({
           const dotY = bubble.cy + radius * 0.7;
           ctx.beginPath();
           ctx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
-          ctx.fillStyle = match.source === 'Both' ? '#3b82f6'
-            : match.source === 'LLM' ? '#a855f7'
-            : match.source === 'Tesseract' ? '#06b6d4'
+          ctx.fillStyle = match.source === 'Table+Validated' ? '#3b82f6'
+            : match.source === 'TableOnly' ? '#06b6d4'
             : '#6b7280';
           ctx.fill();
         }

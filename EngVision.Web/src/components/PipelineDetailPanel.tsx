@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { BubbleResult, DimensionMatch, PipelineResult } from '../types';
+import { getBubbleCaptureUrl } from '../api';
 
 interface Props {
   result: PipelineResult;
@@ -82,6 +83,7 @@ export default function PipelineDetailPanel({ result, selectedBubble, onSelectBu
                 <MetricRow label="Total time" value={formatMs(result.metrics.totalDurationMs)} />
                 <MetricRow label="  Render" value={formatMs(result.metrics.renderDurationMs)} />
                 <MetricRow label="  Detect" value={formatMs(result.metrics.detectDurationMs)} />
+                <MetricRow label="  Trace" value={formatMs(result.metrics.traceDurationMs)} />
                 <MetricRow label="  OCR" value={formatMs(result.metrics.ocrDurationMs)} />
                 <MetricRow label="  LLM" value={formatMs(result.metrics.llmDurationMs)} />
                 <MetricRow label="  Merge" value={formatMs(result.metrics.mergeDurationMs)} />
@@ -114,8 +116,8 @@ export default function PipelineDetailPanel({ result, selectedBubble, onSelectBu
           <DetailRow label="Radius" value={`${selectedBubbleData.radius}px`} />
           <DetailRow
             label="Dimension"
-            value={selectedMatch.dimension ?? '—'}
-            color={selectedMatch.dimension ? '#22c55e' : '#ef4444'}
+            value={selectedMatch.dimension ?? selectedMatch.llmObservedValue ?? '—'}
+            color={selectedMatch.dimension ? '#22c55e' : selectedMatch.llmObservedValue ? '#a855f7' : '#ef4444'}
           />
           <DetailRow label="Source" value={selectedMatch.source}>
             <SourceBadge source={selectedMatch.source} />
@@ -147,12 +149,42 @@ export default function PipelineDetailPanel({ result, selectedBubble, onSelectBu
                 <span style={{ color: '#06b6d4' }}>Tesseract:</span>{' '}
                 <code>{selectedMatch.tesseractValue ?? '—'}</code>
               </div>
-              <div style={{ color: '#c9d1d9' }}>
-                <span style={{ color: '#a855f7' }}>LLM:</span>{' '}
-                <code>{selectedMatch.llmValue ?? '—'}</code>
+              <div style={{ color: '#c9d1d9', marginBottom: 2 }}>
+                <span style={{ color: '#a855f7' }}>LLM Observed:</span>{' '}
+                <code>{selectedMatch.llmObservedValue ?? '—'}</code>
               </div>
+              {selectedMatch.llmMatches != null && (
+                <div style={{ color: '#c9d1d9', marginBottom: 2 }}>
+                  <span style={{ color: selectedMatch.llmMatches ? '#22c55e' : '#ef4444' }}>
+                    {selectedMatch.llmMatches ? '✓ LLM confirms match' : '✗ LLM says mismatch'}
+                  </span>
+                  {selectedMatch.llmConfidence > 0 && (
+                    <span style={{ color: '#8b949e', marginLeft: 6 }}>
+                      ({(selectedMatch.llmConfidence * 100).toFixed(0)}% confident)
+                    </span>
+                  )}
+                </div>
+              )}
+              {selectedMatch.llmNotes && (
+                <div style={{ color: '#8b949e', fontSize: 11, fontStyle: 'italic', marginTop: 2 }}>
+                  {selectedMatch.llmNotes}
+                </div>
+              )}
             </div>
           )}
+          {/* Capture box preview — what the LLM saw */}
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 11, color: '#8b949e', fontWeight: 600, marginBottom: 4 }}>
+              CAPTURE CROP {selectedMatch.captureSize && (
+                <span style={{ fontWeight: 400 }}>({selectedMatch.captureSize})</span>
+              )}
+            </div>
+            <CapturePreview
+              runId={result.runId}
+              bubbleNo={selectedBubble!}
+              captureSize={selectedMatch.captureSize}
+            />
+          </div>
         </div>
       )}
 
@@ -194,11 +226,11 @@ export default function PipelineDetailPanel({ result, selectedBubble, onSelectBu
                 #{b.bubbleNumber}
               </span>
               <span style={{
-                color: match?.dimension ? '#8b949e' : '#ef444488',
+                color: (match?.dimension || match?.llmObservedValue) ? '#8b949e' : '#ef444488',
                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
                 fontSize: 12,
               }}>
-                {match?.dimension ?? 'No match'}
+                {match?.dimension ?? match?.llmObservedValue ?? 'No match'}
               </span>
               <span style={{ fontSize: 10, color: dotColor, minWidth: 32, textAlign: 'right' }}>
                 {(conf * 100).toFixed(0)}%
@@ -217,9 +249,9 @@ export default function PipelineDetailPanel({ result, selectedBubble, onSelectBu
           <LegendItem color="#ef4444" label="Error" />
         </div>
         <div style={{ display: 'flex', gap: 12, marginTop: 4, flexWrap: 'wrap' }}>
-          <LegendItem color="#3b82f6" label="Both" dot />
-          <LegendItem color="#06b6d4" label="OCR" dot />
-          <LegendItem color="#a855f7" label="LLM" dot />
+          <LegendItem color="#3b82f6" label="Validated" dot />
+          <LegendItem color="#06b6d4" label="OCR Only" dot />
+          <LegendItem color="#6b7280" label="None" dot />
         </div>
       </div>
     </div>
@@ -296,8 +328,14 @@ function DetailRow({ label, value, color, children }: {
 
 function SourceBadge({ source, small }: { source: string; small?: boolean }) {
   const colors: Record<string, string> = {
-    Both: '#3b82f6', Tesseract: '#06b6d4', LLM: '#a855f7', None: '#6b7280',
+    'Table+Validated': '#3b82f6', 'TableOnly': '#06b6d4', None: '#6b7280',
+    // Legacy source values
+    Both: '#3b82f6', Tesseract: '#06b6d4', LLM: '#a855f7',
   };
+  const labels: Record<string, string> = {
+    'Table+Validated': 'Validated', 'TableOnly': 'OCR Only',
+  };
+  const displayLabel = labels[source] ?? source;
   return (
     <span style={{
       background: (colors[source] ?? '#6b7280') + '30',
@@ -307,7 +345,7 @@ function SourceBadge({ source, small }: { source: string; small?: boolean }) {
       fontSize: small ? 10 : 11,
       fontWeight: 600,
     }}>
-      {source}
+      {displayLabel}
     </span>
   );
 }
@@ -322,5 +360,56 @@ function LegendItem({ color, label, dot }: { color: string; label: string; dot?:
       }} />
       {label}
     </span>
+  );
+}
+
+function CapturePreview({ runId, bubbleNo, captureSize }: {
+  runId: string; bubbleNo: number; captureSize: string | null;
+}) {
+  const [selectedSize, setSelectedSize] = useState<string | undefined>(undefined);
+  const [imgError, setImgError] = useState(false);
+  const allSizes = ['128x128', '256x128', '512x256', '1024x512'];
+  const displaySize = selectedSize ?? (captureSize || undefined);
+  const imgUrl = getBubbleCaptureUrl(runId, bubbleNo, displaySize);
+
+  return (
+    <div>
+      {/* Size selector tabs */}
+      <div style={{ display: 'flex', gap: 2, marginBottom: 4 }}>
+        {allSizes.map(size => (
+          <button
+            key={size}
+            onClick={() => { setSelectedSize(size); setImgError(false); }}
+            style={{
+              background: displaySize === size ? '#1f6feb' : '#21262d',
+              color: displaySize === size ? '#fff' : '#8b949e',
+              border: 'none', borderRadius: 3, padding: '2px 6px',
+              fontSize: 10, cursor: 'pointer', fontFamily: 'monospace',
+            }}
+          >
+            {size}
+          </button>
+        ))}
+      </div>
+      {/* Capture image */}
+      <div style={{
+        background: '#0d1117', border: '1px solid #30363d', borderRadius: 4,
+        padding: 4, textAlign: 'center', minHeight: 60,
+      }}>
+        {imgError ? (
+          <span style={{ color: '#8b949e', fontSize: 11 }}>No capture at this size</span>
+        ) : (
+          <img
+            src={imgUrl}
+            alt={`Capture for bubble #${bubbleNo}`}
+            style={{
+              maxWidth: '100%', maxHeight: 200, imageRendering: 'pixelated',
+              border: '1px solid #30363d', borderRadius: 2,
+            }}
+            onError={() => setImgError(true)}
+          />
+        )}
+      </div>
+    </div>
   );
 }
