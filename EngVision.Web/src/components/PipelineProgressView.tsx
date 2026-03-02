@@ -117,30 +117,51 @@ function StepRow({ step }: { step: PipelineStep }) {
     ? Object.entries(step.detail).map(([k, v]) => `${k}: ${v}`).join(', ')
     : '';
 
+  const hasProgress = step.progressTotal != null && step.progressTotal > 0;
+  const progressPct = hasProgress ? Math.round((step.progressCurrent! / step.progressTotal!) * 100) : 0;
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
+      display: 'flex', flexDirection: 'column', gap: 2,
       padding: '5px 8px', borderRadius: 6,
       background: step.status === 'running' ? '#1c2128' : 'transparent',
     }}>
-      <span style={{ color: iconColor, fontSize: 14, fontWeight: 700, width: 16, textAlign: 'center' }}>
-        {step.status === 'running' ? <Spinner /> : icon}
-      </span>
-      <span style={{
-        flex: 1, fontSize: 13,
-        color: step.status === 'pending' ? '#484f58' : '#c9d1d9',
-      }}>
-        {step.name}
-      </span>
-      {step.durationMs != null && (
-        <span style={{ fontSize: 12, color: '#8b949e', minWidth: 50, textAlign: 'right' }}>
-          {formatMs(step.durationMs)}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ color: iconColor, fontSize: 14, fontWeight: 700, width: 16, textAlign: 'center' }}>
+          {step.status === 'running' ? <Spinner /> : icon}
         </span>
-      )}
-      {detailText && (
-        <span style={{ fontSize: 11, color: '#6e7681' }}>
-          ({detailText})
+        <span style={{
+          flex: 1, fontSize: 13,
+          color: step.status === 'pending' ? '#484f58' : '#c9d1d9',
+        }}>
+          {step.name}
         </span>
+        {step.durationMs != null && (
+          <span style={{ fontSize: 12, color: '#8b949e', minWidth: 50, textAlign: 'right' }}>
+            {formatMs(step.durationMs)}
+          </span>
+        )}
+        {detailText && (
+          <span style={{ fontSize: 11, color: '#6e7681' }}>
+            ({detailText})
+          </span>
+        )}
+      </div>
+      {hasProgress && step.status === 'running' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 26 }}>
+          <div style={{
+            flex: 1, height: 6, background: '#21262d', borderRadius: 3, overflow: 'hidden',
+          }}>
+            <div style={{
+              width: `${progressPct}%`, height: '100%',
+              background: '#f59e0b', borderRadius: 3,
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+          <span style={{ fontSize: 11, color: '#8b949e', whiteSpace: 'nowrap' }}>
+            {step.progressMessage || `${step.progressCurrent}/${step.progressTotal}`}
+          </span>
+        </div>
       )}
     </div>
   );
@@ -152,7 +173,7 @@ const COLORS = {
   pending: '#21262d',
   checking: '#58a6ff',
   match: '#3fb950',
-  expanding: '#f59e0b',
+  expanding: '#db61a2',
   bestGuess: '#d29922',
   noMatch: '#f85149',
   discovered: '#a371f7',

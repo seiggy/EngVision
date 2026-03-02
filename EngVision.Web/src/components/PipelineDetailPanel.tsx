@@ -146,7 +146,7 @@ export default function PipelineDetailPanel({ result, selectedBubble, onSelectBu
                 </div>
               )}
               <div style={{ color: '#c9d1d9', marginBottom: 2 }}>
-                <span style={{ color: '#06b6d4' }}>Tesseract:</span>{' '}
+                <span style={{ color: '#06b6d4' }}>OCR:</span>{' '}
                 <code>{selectedMatch.tesseractValue ?? '—'}</code>
               </div>
               <div style={{ color: '#c9d1d9', marginBottom: 2 }}>
@@ -330,7 +330,7 @@ function SourceBadge({ source, small }: { source: string; small?: boolean }) {
   const colors: Record<string, string> = {
     'Table+Validated': '#3b82f6', 'TableOnly': '#06b6d4', None: '#6b7280',
     // Legacy source values
-    Both: '#3b82f6', Tesseract: '#06b6d4', LLM: '#a855f7',
+    Both: '#3b82f6', Tesseract: '#06b6d4', LLM: '#a855f7', OCR: '#06b6d4',
   };
   const labels: Record<string, string> = {
     'Table+Validated': 'Validated', 'TableOnly': 'OCR Only',

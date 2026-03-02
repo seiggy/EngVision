@@ -98,24 +98,42 @@ public class PipelineService
                 Cv2.ImWrite(Path.Combine(rawCropsDir, $"bubble_{b.BubbleNumber:D3}.png"), crop);
             }
 
-            // Step 2c: OCR bubble numbers
+            // Step 2c: OCR bubble numbers via LLM vision (parallel, fast)
             Progress("OCR-ing bubble numbers...");
             stepSw.Restart();
-            var (bubbleOcr, tableOcrSvc) = CreateOcrServices();
-            using var ocrDisp = bubbleOcr as IDisposable;
-            using var tableDisp = tableOcrSvc as IDisposable;
-            var ocrResults = bubbleOcr.ExtractAll(rawCropsDir);
+            var ocrResults = new Dictionary<string, int?>();
+            var llmEp = Environment.GetEnvironmentVariable("AZURE_ENDPOINT");
+            var llmK = Environment.GetEnvironmentVariable("AZURE_KEY");
+            var llmM = Environment.GetEnvironmentVariable("AZURE_DEPLOYMENT_NAME") ?? "gpt-5.3-codex";
+
+            if (!string.IsNullOrEmpty(llmK) && !string.IsNullOrEmpty(llmEp))
+            {
+                var ocrClient = new ResponsesClient(
+                    llmM,
+                    new System.ClientModel.ApiKeyCredential(llmK),
+                    new OpenAIClientOptions { Endpoint = new Uri($"{llmEp.TrimEnd('/')}/openai/v1/") });
+                var llmOcr = new LlmBubbleOcrService(ocrClient);
+                ocrResults = await llmOcr.ExtractAllAsync(rawCropsDir);
+            }
+            else
+            {
+                var (bubbleOcr, _) = CreateOcrServices();
+                using var ocrDisp = bubbleOcr as IDisposable;
+                ocrResults = bubbleOcr.ExtractAll(rawCropsDir);
+            }
 
             // Step 3: Table OCR (pages 2+)
             Progress("OCR-ing table data...");
+            var (_, tableOcrSvc0) = CreateOcrServices();
+            using var tableDisp0 = tableOcrSvc0 as IDisposable;
             var tesseractDimensions = new Dictionary<int, string>();
-            if (tableOcrSvc is AzureTableOcrService azureTable)
+            if (tableOcrSvc0 is AzureTableOcrService azureTable)
             {
                 // Full-PDF mode: single API call for all pages
                 var pdfBytes = File.ReadAllBytes(pdfPath);
                 tesseractDimensions = azureTable.ExtractBalloonDimensionsFromPdf(pdfBytes);
             }
-            else if (tableOcrSvc is TableOcrService localTable)
+            else if (tableOcrSvc0 is TableOcrService localTable)
             {
                 for (int i = 1; i < pageImages.Count; i++)
                 {
@@ -414,7 +432,9 @@ public class PipelineService
     public IAsyncEnumerable<Dictionary<string, object>> RunStreamAsync(string pdfPath, string runId, string outputDir)
     {
         var channel = Channel.CreateUnbounded<Dictionary<string, object>>();
-        _ = RunStreamCoreAsync(channel.Writer, pdfPath, runId, outputDir);
+        // Must use Task.Run to prevent synchronous pipeline work (PDF render, bubble detection)
+        // from blocking the calling thread before ReadAllAsync() is returned.
+        _ = Task.Run(() => RunStreamCoreAsync(channel.Writer, pdfPath, runId, outputDir));
         return channel.Reader.ReadAllAsync();
     }
 
@@ -431,6 +451,7 @@ public class PipelineService
 
         try
         {
+            Console.WriteLine($"  Pipeline config: OCR={_config.OcrProvider}, DocIntEndpoint={_config.AzureDocIntEndpoint}, LLM={_config.OpenAIEndpoint}");
             var totalSw = Stopwatch.StartNew();
             var stepSw = new Stopwatch();
             long renderMs = 0, detectMs = 0, traceMs = 0, ocrMs = 0, llmMs = 0, mergeMs = 0, overlayMs = 0;
@@ -464,7 +485,7 @@ public class PipelineService
             await writer.WriteAsync(new Dictionary<string, object>
             {
                 ["type"] = "step", ["step"] = 2, ["totalSteps"] = 7,
-                ["name"] = "detect", ["message"] = "Detecting bubbles and OCR-ing bubble numbers..."
+                ["name"] = "detect", ["message"] = "Detecting bubbles..."
             });
             stepSw.Restart();
             var bubbleDetector = new BubbleDetectionService(_config);
@@ -482,11 +503,6 @@ public class PipelineService
                 using var crop = new Mat(pageImages[0], new Rect(x1, y1, x2 - x1, y2 - y1));
                 Cv2.ImWrite(Path.Combine(rawCropsDir, $"bubble_{b.BubbleNumber:D3}.png"), crop);
             }
-
-            var (bubbleOcr2, tableOcrSvc2) = CreateOcrServices();
-            using var ocrDisp2 = bubbleOcr2 as IDisposable;
-            using var tableDisp2 = tableOcrSvc2 as IDisposable;
-            var ocrResults = bubbleOcr2.ExtractAll(rawCropsDir);
             detectMs = stepSw.ElapsedMilliseconds;
 
             await writer.WriteAsync(new Dictionary<string, object>
@@ -496,29 +512,110 @@ public class PipelineService
                 ["detail"] = new Dictionary<string, object> { ["bubbleCount"] = bubbles.Count }
             });
 
-            // Step 3: Table OCR (pages 2+)
+            // Step 3: OCR — bubble numbers + table dimensions
+            // Total work: bubbles.Count individual OCR calls + 1 table OCR call
+            int ocrTotal = bubbles.Count + 1;
             await writer.WriteAsync(new Dictionary<string, object>
             {
                 ["type"] = "step", ["step"] = 3, ["totalSteps"] = 7,
-                ["name"] = "ocr", ["message"] = "OCR-ing table data..."
+                ["name"] = "ocr", ["message"] = "OCR-ing bubble numbers and table data..."
             });
             stepSw.Restart();
-            var tesseractDimensions = new Dictionary<int, string>();
-            if (tableOcrSvc2 is AzureTableOcrService azureTable2)
+
+            // Use LLM vision for bubble OCR (parallel, faster, more accurate)
+            var llmEndpoint = Environment.GetEnvironmentVariable("AZURE_ENDPOINT");
+            var llmKey = Environment.GetEnvironmentVariable("AZURE_KEY");
+            var llmModel = Environment.GetEnvironmentVariable("AZURE_DEPLOYMENT_NAME") ?? "gpt-5.3-codex";
+
+            var cropFiles = Directory.GetFiles(rawCropsDir, "bubble_*.png").OrderBy(f => f).ToArray();
+            var ocrResults = new Dictionary<string, int?>();
+
+            if (!string.IsNullOrEmpty(llmKey) && !string.IsNullOrEmpty(llmEndpoint))
             {
+                Console.WriteLine($"  [LLM-OCR] Starting LLM bubble number OCR ({cropFiles.Length} crops, parallel)...");
+                var ocrClient = new ResponsesClient(
+                    llmModel,
+                    new System.ClientModel.ApiKeyCredential(llmKey),
+                    new OpenAIClientOptions { Endpoint = new Uri($"{llmEndpoint.TrimEnd('/')}/openai/v1/") });
+                var llmOcr = new LlmBubbleOcrService(ocrClient);
+
+                ocrResults = await llmOcr.ExtractAllAsync(rawCropsDir, async (idx, filename, number) =>
+                {
+                    await writer.WriteAsync(new Dictionary<string, object>
+                    {
+                        ["type"] = "stepProgress", ["step"] = 3,
+                        ["message"] = $"Bubble OCR {idx}/{cropFiles.Length}",
+                        ["current"] = idx, ["total"] = ocrTotal
+                    });
+                });
+            }
+            else
+            {
+                // Fallback to Doc Intelligence or Tesseract
+                Console.WriteLine($"  [OCR] LLM not configured, falling back to OCR provider ({cropFiles.Length} crops)...");
+                var (bubbleOcr2, _tempTable) = CreateOcrServices();
+                using var ocrDisp2 = bubbleOcr2 as IDisposable;
+                (_tempTable as IDisposable)?.Dispose();
+
+                for (int i = 0; i < cropFiles.Length; i++)
+                {
+                    var path = cropFiles[i];
+                    var cropName = Path.GetFileName(path);
+                    ocrResults[cropName] = bubbleOcr2.ExtractBubbleNumber(path);
+                    Console.WriteLine($"  [OCR] Bubble {i + 1}/{cropFiles.Length}: {cropName} → {ocrResults[cropName]?.ToString() ?? "null"}");
+                    await writer.WriteAsync(new Dictionary<string, object>
+                    {
+                        ["type"] = "stepProgress", ["step"] = 3,
+                        ["message"] = $"Bubble OCR {i + 1}/{cropFiles.Length}",
+                        ["current"] = i + 1, ["total"] = ocrTotal
+                    });
+                }
+            }
+            Console.WriteLine($"  [LLM-OCR] Bubble number OCR done: {ocrResults.Count} results in {stepSw.ElapsedMilliseconds}ms");
+
+            var tesseractDimensions = new Dictionary<int, string>();
+            // Create table OCR service (separate from bubble OCR which now uses LLM)
+            var (_, tableOcrSvc) = CreateOcrServices();
+            using var tableDisp = tableOcrSvc as IDisposable;
+
+            if (tableOcrSvc is AzureTableOcrService azureTable2)
+            {
+                Console.WriteLine($"  [OCR] Starting Azure Doc Intelligence table OCR ({pageCount - 1} table pages)...");
+                await writer.WriteAsync(new Dictionary<string, object>
+                {
+                    ["type"] = "stepProgress", ["step"] = 3,
+                    ["message"] = $"Extracting table dimensions ({pageCount - 1} table pages)...",
+                    ["current"] = cropFiles.Length, ["total"] = ocrTotal
+                });
                 var pdfBytes = File.ReadAllBytes(pdfPath);
                 tesseractDimensions = azureTable2.ExtractBalloonDimensionsFromPdf(pdfBytes);
+                Console.WriteLine($"  [OCR] Azure Doc Intelligence done: {tesseractDimensions.Count} dimensions in {stepSw.ElapsedMilliseconds}ms");
+                await writer.WriteAsync(new Dictionary<string, object>
+                {
+                    ["type"] = "stepProgress", ["step"] = 3,
+                    ["message"] = $"Table OCR done ({tesseractDimensions.Count} dimensions)",
+                    ["current"] = ocrTotal, ["total"] = ocrTotal
+                });
             }
-            else if (tableOcrSvc2 is TableOcrService localTable2)
+            else if (tableOcrSvc is TableOcrService localTable2)
             {
                 for (int i = 1; i < pageImages.Count; i++)
                 {
+                    Console.WriteLine($"  [OCR] Tesseract table page {i}/{pageCount - 1}...");
+                    await writer.WriteAsync(new Dictionary<string, object>
+                    {
+                        ["type"] = "stepProgress", ["step"] = 3,
+                        ["message"] = $"OCR-ing table page {i}/{pageCount - 1}...",
+                        ["current"] = cropFiles.Length + i, ["total"] = ocrTotal
+                    });
                     var pageDims = localTable2.ExtractBalloonDimensions(pageImages[i]);
+                    Console.WriteLine($"  [OCR] Tesseract table page {i} done: {pageDims.Count} dimensions");
                     foreach (var (num, dim) in pageDims)
                         tesseractDimensions.TryAdd(num, dim);
                 }
             }
             ocrMs = stepSw.ElapsedMilliseconds;
+            Console.WriteLine($"  [OCR] Total OCR step: {ocrMs}ms, {tesseractDimensions.Count} dimensions");
 
             await writer.WriteAsync(new Dictionary<string, object>
             {
@@ -846,9 +943,10 @@ public class PipelineService
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"  PIPELINE ERROR: {ex}");
             await writer.WriteAsync(new Dictionary<string, object>
             {
-                ["type"] = "error", ["message"] = ex.Message
+                ["type"] = "error", ["message"] = ex.ToString()
             });
         }
         finally

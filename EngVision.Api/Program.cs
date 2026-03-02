@@ -30,7 +30,16 @@ builder.Services.AddCors(options =>
 builder.Services.AddSingleton<EngVisionConfig>(_ => new EngVisionConfig
 {
     PdfRenderDpi = 300,
-    OutputDirectory = Path.Combine(AppContext.BaseDirectory, "Output")
+    OutputDirectory = Path.Combine(AppContext.BaseDirectory, "Output"),
+    OpenAIApiKey = Environment.GetEnvironmentVariable("AZURE_KEY")
+        ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "",
+    OpenAIModel = Environment.GetEnvironmentVariable("AZURE_DEPLOYMENT_NAME")
+        ?? Environment.GetEnvironmentVariable("OPENAI_MODEL") ?? "gpt-5.3-codex",
+    OpenAIEndpoint = Environment.GetEnvironmentVariable("AZURE_ENDPOINT")
+        ?? Environment.GetEnvironmentVariable("OPENAI_ENDPOINT"),
+    OcrProvider = Environment.GetEnvironmentVariable("OCR_PROVIDER") ?? "Tesseract",
+    AzureDocIntEndpoint = Environment.GetEnvironmentVariable("AZURE_DOCINT_ENDPOINT") ?? "",
+    AzureDocIntKey = Environment.GetEnvironmentVariable("AZURE_DOCINT_KEY") ?? ""
 });
 builder.Services.AddSingleton<PdfRendererService>(sp =>
     new PdfRendererService(sp.GetRequiredService<EngVisionConfig>().PdfRenderDpi));
@@ -402,6 +411,10 @@ app.MapPost("/api/pipeline/run-stream", async (HttpRequest request, PipelineServ
     context.Response.ContentType = "text/event-stream";
     context.Response.Headers["Cache-Control"] = "no-cache";
     context.Response.Headers["Connection"] = "keep-alive";
+    context.Response.Headers["X-Accel-Buffering"] = "no";
+    var bufferingFeature = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>();
+    bufferingFeature?.DisableBuffering();
+    await context.Response.StartAsync();
 
     var sseJsonOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
@@ -435,6 +448,10 @@ app.MapPost("/api/pipeline/run-stream-sample/{filename}", async (string filename
     context.Response.ContentType = "text/event-stream";
     context.Response.Headers["Cache-Control"] = "no-cache";
     context.Response.Headers["Connection"] = "keep-alive";
+    context.Response.Headers["X-Accel-Buffering"] = "no";
+    var bufferingFeature2 = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpResponseBodyFeature>();
+    bufferingFeature2?.DisableBuffering();
+    await context.Response.StartAsync();
 
     var sseJsonOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 

@@ -143,9 +143,18 @@ export interface ErrorEvent {
   message: string;
 }
 
+export interface StepProgressEvent {
+  type: 'stepProgress';
+  step: number;
+  message: string;
+  current: number;
+  total: number;
+}
+
 export type PipelineSSEEvent =
   | StepEvent
   | StepCompleteEvent
+  | StepProgressEvent
   | BubbleEvent
   | CompleteEvent
   | ErrorEvent;
@@ -157,6 +166,9 @@ export interface PipelineStep {
   status: 'pending' | 'running' | 'complete';
   durationMs?: number;
   detail?: Record<string, unknown>;
+  progressCurrent?: number;
+  progressTotal?: number;
+  progressMessage?: string;
 }
 
 export interface BubbleStatus {

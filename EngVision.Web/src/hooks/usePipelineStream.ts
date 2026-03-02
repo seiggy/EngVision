@@ -186,6 +186,25 @@ function processEvent(
                 status: 'complete' as const,
                 durationMs: event.durationMs,
                 detail: event.detail,
+                progressCurrent: undefined,
+                progressTotal: undefined,
+                progressMessage: undefined,
+              }
+            : s
+        ),
+      }));
+      break;
+
+    case 'stepProgress':
+      setState(prev => ({
+        ...prev,
+        steps: prev.steps.map(s =>
+          s.step === event.step
+            ? {
+                ...s,
+                progressCurrent: event.current,
+                progressTotal: event.total,
+                progressMessage: event.message,
               }
             : s
         ),

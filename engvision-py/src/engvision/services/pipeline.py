@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import glob
 import json
 import os
 import time
@@ -102,14 +103,29 @@ class PipelineService:
                 crop = page_images[0][y1:y2, x1:x2]
                 cv2.imwrite(os.path.join(raw_crops_dir, f"bubble_{b['bubbleNumber']:03d}.png"), crop)
 
-            # Step 2c: OCR bubble numbers
+            # Step 2c: OCR bubble numbers via LLM vision (parallel, fast)
             progress("OCR-ing bubble numbers...")
             step_start = time.time()
-            ocr_service, table_ocr = self._create_ocr_services()
-            ocr_results = ocr_service.extract_all(raw_crops_dir)
+            llm_endpoint = os.environ.get("AZURE_ENDPOINT", "")
+            llm_key = os.environ.get("AZURE_KEY", "")
+            llm_model = os.environ.get("AZURE_DEPLOYMENT_NAME", "gpt-5.3-codex")
+
+            if llm_endpoint and llm_key:
+                from openai import OpenAI
+                from .llm_bubble_ocr import LlmBubbleOcrService
+                llm_client = OpenAI(
+                    api_key=llm_key,
+                    base_url=f"{llm_endpoint.rstrip('/')}/openai/v1",
+                )
+                llm_ocr = LlmBubbleOcrService(llm_client, llm_model)
+                ocr_results = llm_ocr.extract_all(raw_crops_dir)
+            else:
+                ocr_service, _ = self._create_ocr_services()
+                ocr_results = ocr_service.extract_all(raw_crops_dir)
 
             # Step 3: Table OCR (pages 2+)
             progress("OCR-ing table data...")
+            _, table_ocr = self._create_ocr_services()
             tesseract_dimensions: dict[int, str] = {}
 
             # Azure Doc Intelligence supports full-PDF mode for efficient table extraction
@@ -196,13 +212,12 @@ class PipelineService:
 
             if key and endpoint:
                 progress("Validating dimensions with Vision LLM...")
-                from openai import AzureOpenAI
+                from openai import OpenAI
                 from .vision_llm import VisionLlmService
 
-                client = AzureOpenAI(
+                client = OpenAI(
                     api_key=key,
-                    azure_endpoint=endpoint,
-                    api_version="2024-12-01-preview",
+                    base_url=f"{endpoint.rstrip('/')}/openai/v1",
                 )
                 vision_service = VisionLlmService(client, model)
 
@@ -513,7 +528,7 @@ class PipelineService:
                    "detail": {"pageCount": page_count, "imageSize": f"{img_w}x{img_h}"}}
 
             # Step 2: Detect bubbles on page 1
-            yield {"type": "step", "step": 2, "totalSteps": 7, "name": "detect", "message": "Detecting bubbles and OCR-ing bubble numbers..."}
+            yield {"type": "step", "step": 2, "totalSteps": 7, "name": "detect", "message": "Detecting bubbles..."}
             step_start = time.time()
             bubble_detector = BubbleDetectionService(self._config)
             bubbles = bubble_detector.detect_bubbles(page_images[0], page_number=1)
@@ -533,27 +548,84 @@ class PipelineService:
                 crop = page_images[0][y1:y2, x1:x2]
                 cv2.imwrite(os.path.join(raw_crops_dir, f"bubble_{b['bubbleNumber']:03d}.png"), crop)
 
-            ocr_service, table_ocr = self._create_ocr_services()
-            ocr_results = ocr_service.extract_all(raw_crops_dir)
             detect_ms = int((time.time() - step_start) * 1000)
             yield {"type": "stepComplete", "step": 2, "name": "detect", "durationMs": detect_ms,
                    "detail": {"bubbleCount": len(bubbles)}}
 
-            # Step 3: Table OCR (pages 2+)
-            yield {"type": "step", "step": 3, "totalSteps": 7, "name": "ocr", "message": "OCR-ing table data..."}
-            step_start = time.time()
-            tesseract_dimensions: dict[int, str] = {}
+            # Step 3: OCR — bubble numbers (LLM) + table dimensions
+            crop_files = sorted(glob.glob(os.path.join(raw_crops_dir, "bubble_*.png")))
+            ocr_total = len(crop_files) + 1  # bubble crops + 1 table OCR call
 
-            # Azure Doc Intelligence supports full-PDF mode for efficient table extraction
+            yield {"type": "step", "step": 3, "totalSteps": 7, "name": "ocr", "message": "OCR-ing bubble numbers and table data..."}
+            step_start = time.time()
+
+            # Use LLM vision for bubble OCR (parallel, faster, more accurate)
+            llm_endpoint = os.environ.get("AZURE_ENDPOINT", "")
+            llm_key = os.environ.get("AZURE_KEY", "")
+            llm_model = os.environ.get("AZURE_DEPLOYMENT_NAME", "gpt-5.3-codex")
+
+            ocr_results: dict[str, int | None] = {}
+            if llm_endpoint and llm_key:
+                from openai import OpenAI
+                from .llm_bubble_ocr import LlmBubbleOcrService
+                print(f"  [LLM-OCR] Starting LLM bubble number OCR ({len(crop_files)} crops, parallel)...")
+                llm_client = OpenAI(
+                    api_key=llm_key,
+                    base_url=f"{llm_endpoint.rstrip('/')}/openai/v1",
+                )
+                llm_ocr = LlmBubbleOcrService(llm_client, llm_model)
+
+                # We need to collect progress events and yield them
+                progress_events: list[dict] = []
+                def _on_progress(idx: int, filename: str, number: int | None) -> None:
+                    progress_events.append({
+                        "type": "stepProgress", "step": 3,
+                        "message": f"Bubble OCR {idx}/{len(crop_files)}",
+                        "current": idx, "total": ocr_total,
+                    })
+
+                ocr_results = llm_ocr.extract_all(raw_crops_dir, on_progress=_on_progress)
+                # Yield all accumulated progress events
+                for evt in progress_events:
+                    yield evt
+            else:
+                print(f"  [OCR] LLM not configured, falling back to OCR provider ({len(crop_files)} crops)...")
+                ocr_service, _ = self._create_ocr_services()
+                for i, path in enumerate(crop_files):
+                    crop_name = os.path.basename(path)
+                    ocr_results[crop_name] = ocr_service.extract_bubble_number(path)
+                    print(f"  [OCR] Bubble {i + 1}/{len(crop_files)}: {crop_name} → {ocr_results[crop_name]}")
+                    yield {"type": "stepProgress", "step": 3,
+                           "message": f"Bubble OCR {i + 1}/{len(crop_files)}",
+                           "current": i + 1, "total": ocr_total}
+            print(f"  [LLM-OCR] Bubble number OCR done: {len(ocr_results)} results in {int((time.time() - step_start) * 1000)}ms")
+
+            # Table dimension OCR (create separate table OCR service)
+            _, table_ocr = self._create_ocr_services()
+            tesseract_dimensions: dict[int, str] = {}
             if hasattr(table_ocr, "extract_balloon_dimensions_from_pdf") and pdf_path:
+                print(f"  [OCR] Starting Azure Doc Intelligence table OCR ({page_count - 1} table pages)...")
+                yield {"type": "stepProgress", "step": 3,
+                       "message": f"Extracting table dimensions ({page_count - 1} table pages)...",
+                       "current": len(crop_files), "total": ocr_total}
                 with open(pdf_path, "rb") as f:
                     tesseract_dimensions = table_ocr.extract_balloon_dimensions_from_pdf(f.read())
+                print(f"  [OCR] Azure Doc Intelligence done: {len(tesseract_dimensions)} dimensions in {int((time.time() - step_start) * 1000)}ms")
+                yield {"type": "stepProgress", "step": 3,
+                       "message": f"Table OCR done ({len(tesseract_dimensions)} dimensions)",
+                       "current": ocr_total, "total": ocr_total}
             else:
                 for i in range(1, len(page_images)):
+                    print(f"  [OCR] Tesseract table page {i}/{page_count - 1}...")
+                    yield {"type": "stepProgress", "step": 3,
+                           "message": f"OCR-ing table page {i}/{page_count - 1}...",
+                           "current": len(crop_files) + i, "total": ocr_total}
                     page_dims = table_ocr.extract_balloon_dimensions(page_images[i])
+                    print(f"  [OCR] Tesseract table page {i} done: {len(page_dims)} dimensions")
                     for num, dim in page_dims.items():
                         tesseract_dimensions.setdefault(num, dim)
             ocr_ms = int((time.time() - step_start) * 1000)
+            print(f"  [OCR] Total OCR step: {ocr_ms}ms, {len(tesseract_dimensions)} dimensions")
             yield {"type": "stepComplete", "step": 3, "name": "ocr", "durationMs": ocr_ms,
                    "detail": {"dimensionCount": len(tesseract_dimensions)}}
 
@@ -622,13 +694,12 @@ class PipelineService:
             model = os.environ.get("AZURE_DEPLOYMENT_NAME", "gpt-5.3-codex")
 
             if key and endpoint:
-                from openai import AzureOpenAI
+                from openai import OpenAI
                 from .vision_llm import VisionLlmService
 
-                client = AzureOpenAI(
+                client = OpenAI(
                     api_key=key,
-                    azure_endpoint=endpoint,
-                    api_version="2024-12-01-preview",
+                    base_url=f"{endpoint.rstrip('/')}/openai/v1",
                 )
                 vision_service = VisionLlmService(client, model)
 

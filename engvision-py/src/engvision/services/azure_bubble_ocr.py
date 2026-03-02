@@ -48,7 +48,7 @@ class AzureBubbleOcrService:
 
         poller = self._client.begin_analyze_document(
             "prebuilt-read",
-            analyze_request=buf.tobytes(),
+            body=buf.tobytes(),
             content_type="application/octet-stream",
         )
         result = poller.result()

@@ -30,10 +30,7 @@ if os.path.exists(_env_file):
     load_dotenv(_env_file)
 
 # ── Configuration ────────────────────────────────────────────────────────────────
-config = EngVisionConfig(
-    pdf_render_dpi=300,
-    output_directory=os.path.join(_base_dir, "..", "..", "Output"),
-)
+config = EngVisionConfig.from_env(os.path.join(_base_dir, "..", ".."))
 os.makedirs(config.output_directory, exist_ok=True)
 
 # ── Services (singletons) ───────────────────────────────────────────────────────

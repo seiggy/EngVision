@@ -17,12 +17,13 @@ public class LeaderLineTracerService
 {
     /// Progressive capture box sizes (width, height) — wider than tall.
     /// Pipeline tries each in order; stops when the LLM confirms a match.
+    /// Height stays fixed at 128 so the box doesn't drift vertically.
     public static readonly (int Width, int Height)[] CaptureSteps =
     [
         (128, 128),   // start square
-        (256, 128),   // expand width
-        (512, 256),   // keep expanding
-        (1024, 512),  // max: 1024 px wide
+        (256, 128),   // expand width only
+        (512, 128),   // keep expanding width
+        (1024, 128),  // max: 1024 px wide
     ];
 
     /// <summary>
